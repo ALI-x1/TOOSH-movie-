@@ -12,7 +12,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # First run only: unpack project.zip into real files in the repo, then delete the zip
       - name: Unpack project.zip (once)
         run: |
           if [ -f project.zip ]; then
@@ -29,13 +28,12 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
-      - uses: android-actions/setup-android@v3
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.7'
-      - name: Build APK
-        run: gradle --no-daemon assembleRelease
+      - name: Build debug APK
+        run: gradle --no-daemon assembleDebug
       - uses: actions/upload-artifact@v4
         with:
-          name: TOOSH-MOVIE-apk
-          path: app/build/outputs/apk/release/*.apk
+          name: TOOSH-MOVIE-debug-apk
+          path: app/build/outputs/apk/debug/*.apk
