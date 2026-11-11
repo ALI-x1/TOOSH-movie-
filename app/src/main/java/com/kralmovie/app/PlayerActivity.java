@@ -949,12 +949,12 @@ public class PlayerActivity extends Activity {
         Bitmap bmp = Bitmap.createBitmap(s, s, Bitmap.Config.ARGB_8888);
         Canvas c = new Canvas(bmp);
         Paint grey = new Paint(Paint.ANTI_ALIAS_FLAG);
-        grey.setColor(Color.parseColor("#AAAAAA"));
+        grey.setColor(Color.parseColor("#80F6EFDC"));
         grey.setStyle(Paint.Style.FILL);
         grey.setStrokeWidth(14);
         grey.setStrokeCap(Paint.Cap.ROUND);
         Paint yellow = new Paint(Paint.ANTI_ALIAS_FLAG);
-        yellow.setColor(Color.parseColor("#FFC107"));
+        yellow.setColor(Color.parseColor("#FFD60A"));
         yellow.setStyle(Paint.Style.FILL);
         yellow.setStrokeWidth(14);
         yellow.setStrokeCap(Paint.Cap.ROUND);
@@ -995,7 +995,7 @@ public class PlayerActivity extends Activity {
         Bitmap bmp = Bitmap.createBitmap(s, s, Bitmap.Config.ARGB_8888);
         Canvas c = new Canvas(bmp);
         Paint white = new Paint(Paint.ANTI_ALIAS_FLAG);
-        white.setColor(Color.WHITE);
+        white.setColor(Color.parseColor("#F6EFDC"));
         white.setStyle(Paint.Style.FILL);
         // Speaker body: small rectangle + triangle cone.
         Path speaker = new Path();
@@ -1009,7 +1009,7 @@ public class PlayerActivity extends Activity {
         c.drawPath(speaker, white);
         if (percent <= 0) {
             Paint red = new Paint(Paint.ANTI_ALIAS_FLAG);
-            red.setColor(Color.parseColor("#FF3B30"));
+            red.setColor(Color.parseColor("#EE3B17"));
             red.setStyle(Paint.Style.STROKE);
             red.setStrokeWidth(16);
             red.setStrokeCap(Paint.Cap.ROUND);
@@ -1018,7 +1018,7 @@ public class PlayerActivity extends Activity {
         }
         int waves = percent <= 33 ? 1 : (percent <= 66 ? 2 : 3);
         Paint wave = new Paint(Paint.ANTI_ALIAS_FLAG);
-        wave.setColor(Color.WHITE);
+        wave.setColor(Color.parseColor("#F6EFDC"));
         wave.setStyle(Paint.Style.STROKE);
         wave.setStrokeWidth(13);
         wave.setStrokeCap(Paint.Cap.ROUND);
