@@ -25,13 +25,12 @@ android {
         }
     }
 
-    // One APK per CPU type instead of one fat APK: roughly half the size each.
-    // Install app-arm64-v8a-*.apk on any modern phone (2017 or newer).
+    // arm64-v8a only (every phone since ~2017). Smaller APK, single file to download.
     splits {
         abi {
             enable true
             reset()
-            include 'arm64-v8a', 'armeabi-v7a'
+            include 'arm64-v8a'
             universalApk false
         }
     }

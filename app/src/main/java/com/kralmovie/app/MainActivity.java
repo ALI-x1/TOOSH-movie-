@@ -1721,6 +1721,9 @@ public class MainActivity extends Activity {
         webView = findViewById(R.id.webview);
 
         WebSettings s = webView.getSettings();
+        s.setTextZoom(100);          // ignore system font scale: no re-layout surprises
+        s.setSupportZoom(false);
+        s.setBuiltInZoomControls(false);
         s.setJavaScriptEnabled(true);
         s.setDomStorageEnabled(true);
         s.setDatabaseEnabled(true);
@@ -1748,6 +1751,7 @@ public class MainActivity extends Activity {
             // the window is already hardware accelerated, and an extra offscreen
             // layer on a WebView only costs memory and scroll smoothness.
             webView.setBackgroundColor(0xFF100E0C);
+            webView.setVerticalScrollBarEnabled(false);   // no scrollbar drawing while scrolling
             webView.setOverScrollMode(android.view.View.OVER_SCROLL_IF_CONTENT_SCROLLS);
         } catch (Throwable ignored) {
         }

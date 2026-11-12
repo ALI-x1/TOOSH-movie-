@@ -52,11 +52,37 @@
   window.addEventListener('error',function(e){log('err','JS: '+e.message+(e.filename?' @'+short(e.filename).slice(-30)+':'+e.lineno:''))});
   window.addEventListener('unhandledrejection',function(e){var r=e.reason;log('err','Promise: '+((r&&r.message)||r))});
 
+
+  // ---- scroll / long-task monitor: shows real lag measured on THIS phone ----
+  try{
+    var sc=0,last=0,frames=0,slow=0,worst=0,t0=0,y0=0,idle=0,raf=0,ltAt=0;
+    function tick(n){
+      if(last){var d=n-last;frames++;if(d>33){slow++;if(d>worst)worst=d}}
+      last=n;raf=requestAnimationFrame(tick);
+    }
+    function endScroll(){
+      cancelAnimationFrame(raf);raf=0;last=0;
+      var dur=Date.now()-t0;
+      if(dur>350&&frames>8)log('perf','SCROLL '+Math.abs(Math.round((window.scrollY||0)-y0))+'px in '+(dur/1000).toFixed(1)+'s | frames '+frames+' | slow(>33ms) '+slow+(slow?' | worst '+Math.round(worst)+'ms':''));
+      frames=0;slow=0;worst=0;t0=0;
+    }
+    window.addEventListener('scroll',function(){
+      if(!t0){t0=Date.now();y0=window.scrollY||0}
+      if(!raf)raf=requestAnimationFrame(tick);
+      clearTimeout(idle);idle=setTimeout(endScroll,220);
+    },{passive:true});
+    if(window.PerformanceObserver){
+      new PerformanceObserver(function(l){l.getEntries().forEach(function(e){
+        if(e.duration>120&&Date.now()-ltAt>500){ltAt=Date.now();log('perf','LONGTASK '+Math.round(e.duration)+'ms (main thread blocked)')}
+      })}).observe({entryTypes:['longtask']});
+    }
+  }catch(e){}
+
   function info(){
     var vpn='?';try{vpn=String(window.AndroidPlayer.isVpnActive())}catch(e){vpn='n/a'}
     return 'online='+navigator.onLine+' | vpn='+vpn+' | native='+(window.AndroidPlayer?'yes':'no')+'\n'+short(location.href).slice(0,60)+'\n'+navigator.userAgent.slice(0,120);
   }
-  function fullText(){return info()+'\n\n'+buf.slice().reverse().map(function(x){return x.t+' '+(x.k==='err'?'X':'ok')+' '+x.m}).join('\n')}
+  function fullText(){return info()+'\n\n'+buf.slice().reverse().map(function(x){return x.t+' '+(x.k==='err'?'X':x.k==='perf'?'P':'ok')+' '+x.m}).join('\n')}
   function render(){
     if(els.btn)els.btn.textContent=errCount?('LOG X'+errCount):'LOG';
     if(!open||!els.pre)return;
@@ -64,8 +90,8 @@
     els.pre.textContent='';
     for(var i=buf.length-1;i>=0;i--){
       var x=buf[i],d=document.createElement('div');
-      d.style.cssText='padding:3px 0;border-bottom:1px solid #222;word-break:break-all;color:'+(x.k==='err'?'#ff8a80':'#a5d6a7');
-      d.textContent=x.t+' '+(x.k==='err'?'X':'ok')+' '+x.m;
+      d.style.cssText='padding:3px 0;border-bottom:1px solid #222;word-break:break-all;color:'+(x.k==='err'?'#ff8a80':x.k==='perf'?'#ffd180':'#a5d6a7');
+      d.textContent=x.t+' '+(x.k==='err'?'X':x.k==='perf'?'P':'ok')+' '+x.m;
       els.pre.appendChild(d);
     }
   }
@@ -141,17 +167,57 @@
     toast();
     return new Response(o.b,{status:200,headers:{'Content-Type':'application/json'}});
   }
+  // ---- polite API client: queue + de-dupe + 429 back-off + fresh/stale cache ----
+  var FRESH=45000,MAXC=3,active=0,queue=[],holdUntil=0,inflight={};
+  function pump(){
+    var now=Date.now();
+    if(now<holdUntil){setTimeout(pump,holdUntil-now+20);return}
+    while(active<MAXC&&queue.length){
+      (function(it){
+        active++;
+        var p;try{p=it.fn()}catch(e){p=Promise.reject(e)}
+        p.then(it.res,it.rej).then(function(){active--;setTimeout(pump,90)});
+      })(queue.shift());
+    }
+  }
+  function schedule(fn){return new Promise(function(res,rej){queue.push({fn:fn,res:res,rej:rej});pump()})}
+  function netGet(args,k,attempt){
+    return schedule(function(){return of.apply(window,args)}).then(function(r){
+      if(r.status===429&&attempt<2&&!get(k)){            // have an offline copy? use it right away, don't wait
+        var ra=parseFloat(r.headers&&r.headers.get&&r.headers.get('Retry-After'))||0;
+        var wait=Math.min(7000,(ra?ra*1000:1200*Math.pow(2,attempt))+Math.random()*400);
+        holdUntil=Math.max(holdUntil,Date.now()+wait);      // pause ALL api requests, not just this one
+        lg('err','429 rate-limited: waiting '+Math.round(wait)+'ms then retry '+(attempt+1)+' ('+k.slice(0,50)+')');
+        return new Promise(function(res){setTimeout(res,wait)}).then(function(){return netGet(args,k,attempt+1)});
+      }
+      return r;
+    });
+  }
   window.fetch=function(input,init){
+    var args=arguments;
     var url=typeof input==='string'?input:((input&&input.url)||'');
     var method=String((init&&init.method)||(input&&input.method)||'GET').toUpperCase();
     var k=method==='GET'?path(url):null;
-    var lastResort=/appnxm\.com/.test(url);   // primary failed, backup is the last try
-    return of.apply(this,arguments).then(function(r){
-      if(k&&r.ok){r.clone().text().then(function(t){if(t&&t.length<MAXB&&t.charAt(0)!=='<')put(k,t)},function(){})}
-      else if(k&&lastResort&&r.status>=500){var s=stale(k,url);if(s)return s}
+    if(!k)return of.apply(this,args);                       // POST/auth/other: untouched
+    var lastResort=/appnxm\.com/.test(url);
+    var o=get(k);
+    if(o&&Date.now()-o.t<FRESH){                            // seen a moment ago: no request at all
+      lg('ok','CACHE-FRESH '+k.slice(0,60));
+      return Promise.resolve(new Response(o.b,{status:200,headers:{'Content-Type':'application/json'}}));
+    }
+    var key=url,shared=inflight[key];
+    if(!shared){
+      shared=inflight[key]=netGet(args,k,0);
+      var done=function(){delete inflight[key]};
+      shared.then(done,done);
+    }
+    return shared.then(function(r){
+      r=r.clone();
+      if(r.ok){r.clone().text().then(function(t){if(t&&t.length<MAXB&&t.charAt(0)!=='<')put(k,t)},function(){})}
+      else if(r.status===429||(lastResort&&r.status>=500)){var s=stale(k,url);if(s)return s}
       return r;
     },function(e){
-      if(k&&lastResort){var s=stale(k,url);if(s)return s}
+      if(lastResort){var s=stale(k,url);if(s)return s}
       throw e;
     });
   };
@@ -171,7 +237,7 @@
   }
   function start(){
     if(!('IntersectionObserver' in window))return;
-    io=new IntersectionObserver(function(es){es.forEach(function(e){var b=e.target;if(!e.isIntersecting){b.__n=0;return}b.__n=(b.__n||0)+1;if(b.__n>4)return;setTimeout(function(){fire(b)},200)})},{rootMargin:'700px 0px'});  // max 4 auto tries in a row, then the manual button takes over
+    io=new IntersectionObserver(function(es){es.forEach(function(e){var b=e.target;if(!e.isIntersecting){b.__n=0;return}b.__n=(b.__n||0)+1;b.__t=(b.__t||0)+1;if(b.__n>4||b.__t>12)return;setTimeout(function(){fire(b)},200)})},{rootMargin:'700px 0px'});  // max 4 auto tries in a row, then the manual button takes over
     new MutationObserver(function(){if(!tm)tm=setTimeout(scan,300)}).observe(document.documentElement,{childList:true,subtree:true});
     scan();
   }
@@ -406,6 +472,12 @@ html{overscroll-behavior:none}
 [class*="backdrop-blur"],.backdrop-filter,header.fixed,.sticky,.fixed{-webkit-backdrop-filter:none!important;backdrop-filter:none!important}
 body{background-image:none!important;background-attachment:scroll!important}
 body::before{content:"";position:fixed;inset:0;z-index:-1;pointer-events:none;background-image:radial-gradient(var(--dot) 1.3px,transparent 1.7px);background-size:16px 16px;transform:translateZ(0)}
+
+/* ===== poster cards: lighter (no per-image filter, cheap fade for first screen only) ===== */
+.group.rounded-2xl.cursor-pointer.flex-col img{filter:none!important;transition:none!important}
+.group.rounded-2xl.cursor-pointer.flex-col{animation:tmFade .22s ease-out backwards!important}
+.group.rounded-2xl.cursor-pointer.flex-col:nth-child(n+13){animation:none!important}
+@keyframes tmFade{from{opacity:0}}
 </style>
   </head>
   <body>
