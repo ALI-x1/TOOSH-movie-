@@ -13,7 +13,7 @@
     <application
         android:label="TOOSH MOVIE"
         android:icon="@mipmap/ic_launcher"
-        android:theme="@android:style/Theme.NoTitleBar.Fullscreen"
+        android:theme="@style/AppTheme"
         android:hardwareAccelerated="true"
         android:usesCleartextTraffic="true"
         android:allowBackup="true"

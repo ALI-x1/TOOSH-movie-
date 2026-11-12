@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Dark from the very first frame: no white flash before the WebView paints. -->
+    <style name="AppTheme" parent="@android:style/Theme.NoTitleBar.Fullscreen">
+        <item name="android:windowBackground">@color/toosh_bg</item>
+        <item name="android:colorBackground">@color/toosh_bg</item>
+        <item name="android:statusBarColor">@color/toosh_bg</item>
+        <item name="android:navigationBarColor">@color/toosh_bg</item>
+    </style>
+</resources>

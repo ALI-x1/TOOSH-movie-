@@ -11,27 +11,50 @@ android {
         applicationId 'com.toosh.movie'
         minSdk 24
         targetSdk 34
-        versionCode 1
-        versionName '1.0'
-        ndk { abiFilters 'arm64-v8a', 'armeabi-v7a' }
+        versionCode 2
+        versionName '1.1'
     }
 
-    buildTypes {
-        release {
-            minifyEnabled false
-            // debug key keeps the APK installable without managing a keystore
-            signingConfig signingConfigs.debug
+    // One fixed key, so every new build installs OVER the old one (keeps likes/history).
+    signingConfigs {
+        toosh {
+            storeFile file('toosh.keystore')
+            storePassword 'toosh123'
+            keyAlias 'toosh'
+            keyPassword 'toosh123'
         }
     }
 
-    compileOptions {
-        sourceCompatibility JavaVersion.VERSION_17
-        targetCompatibility JavaVersion.VERSION_17
+    // One APK per CPU type instead of one fat APK: roughly half the size each.
+    // Install app-arm64-v8a-*.apk on any modern phone (2017 or newer).
+    splits {
+        abi {
+            enable true
+            reset()
+            include 'arm64-v8a', 'armeabi-v7a'
+            universalApk false
+        }
+    }
+
+    buildTypes {
+        debug {
+            debuggable false
+            signingConfig signingConfigs.toosh
+        }
+        release {
+            minifyEnabled false
+            signingConfig signingConfigs.toosh
+        }
     }
 
     lint {
         abortOnError false
         checkReleaseBuilds false
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
     }
 
     packagingOptions {

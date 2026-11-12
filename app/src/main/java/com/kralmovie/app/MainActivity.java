@@ -914,11 +914,11 @@ public class MainActivity extends Activity {
             runOnUiThread(() -> {
                 try {
                     startActivity(new Intent(Intent.ACTION_VIEW,
-                            Uri.parse("tg://resolve?domain=ProxyArc")));
+                            Uri.parse("tg://resolve?domain=TOOSH_MOVIE")));
                 } catch (ActivityNotFoundException e) {
                     try {
                         startActivity(new Intent(Intent.ACTION_VIEW,
-                                Uri.parse("https://t.me/ProxyArc")));
+                                Uri.parse("https://t.me/TOOSH_MOVIE")));
                     } catch (Exception ignored) {
                     }
                 } catch (Exception ignored) {
@@ -1744,7 +1744,10 @@ public class MainActivity extends Activity {
         // cache, so scrolling a long poster list does not re-decode
         // on every frame.
         try {
-            webView.setLayerType(android.view.View.LAYER_TYPE_HARDWARE, null);
+            // Dark from frame 0 (no white WebView flash). No forced hardware layer:
+            // the window is already hardware accelerated, and an extra offscreen
+            // layer on a WebView only costs memory and scroll smoothness.
+            webView.setBackgroundColor(0xFF100E0C);
             webView.setOverScrollMode(android.view.View.OVER_SCROLL_IF_CONTENT_SCROLLS);
         } catch (Throwable ignored) {
         }
@@ -1775,7 +1778,7 @@ public class MainActivity extends Activity {
                     } catch (ActivityNotFoundException e) {
                         try {
                             startActivity(new Intent(Intent.ACTION_VIEW,
-                                    Uri.parse("https://t.me/ProxyArc")));
+                                    Uri.parse("https://t.me/TOOSH_MOVIE")));
                         } catch (Exception ignored) {
                         }
                     } catch (Exception ignored) {
@@ -1853,9 +1856,10 @@ public class MainActivity extends Activity {
             }
         });
 
-        if (savedInstanceState == null) {
-            webView.loadUrl("file:///android_asset/index.html");
-        }
+        // Always load: after the system kills the process and recreates the
+        // activity, savedInstanceState is non-null but the WebView is empty,
+        // which used to leave a blank page.
+        webView.loadUrl("file:///android_asset/index.html");
     }
 
     @Override
