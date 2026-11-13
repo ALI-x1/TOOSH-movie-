@@ -27,6 +27,7 @@ import android.view.WindowInsetsController;
 import android.view.WindowManager;
 import android.view.SurfaceView;
 import android.widget.Button;
+import android.widget.Toast;
 import android.widget.ImageButton;
 import android.widget.ImageView;
 import android.widget.FrameLayout;
@@ -165,6 +166,27 @@ public class PlayerActivity extends Activity {
     };
 
     private boolean controlsVisible = true;
+    // continue-watching / next episode / lock
+    private String progKey, metaJson, currentTitle;
+    private long resumeMs;
+    private boolean resumeDone = false;
+    private int saveTick = 0;
+    private org.json.JSONArray queue;
+    private boolean locked = false;
+    private View nextCard, unlockBtn;
+    private int nextCount = 0;
+    private final Runnable nextTickRunnable = new Runnable() {
+        @Override public void run() {
+            nextCount--;
+            TextView b = findViewById(R.id.player_next_now);
+            if (nextCount <= 0) { playNextNow(); return; }
+            if (b != null) b.setText("همین الان (" + nextCount + ")");
+            handler.postDelayed(this, 1000);
+        }
+    };
+    private final Runnable hideUnlockRunnable = new Runnable() {
+        @Override public void run() { if (unlockBtn != null) unlockBtn.setVisibility(View.GONE); }
+    };
     private boolean subtitlesOn = true;
     private boolean seeking = false;
 
@@ -225,6 +247,16 @@ public class PlayerActivity extends Activity {
         originalUrl = getIntent().getStringExtra("url");
         String title = getIntent().getStringExtra("title");
         userAgent = getIntent().getStringExtra("ua");
+        currentTitle = title;
+        progKey = getIntent().getStringExtra("key");
+        if (progKey == null || progKey.isEmpty()) progKey = Progress.keyFor(originalUrl);
+        metaJson = getIntent().getStringExtra("meta");
+        resumeMs = getIntent().getLongExtra("resume", 0L);
+        try {
+            if (metaJson != null && metaJson.length() > 1) {
+                queue = new org.json.JSONObject(metaJson).optJSONArray("queue");
+            }
+        } catch (Throwable ignored) { }
         if (originalUrl == null || originalUrl.isEmpty()) {
             finish();
             return;
@@ -265,6 +297,23 @@ public class PlayerActivity extends Activity {
 
         findViewById(R.id.player_root).setOnTouchListener((v, event) -> onPlayerTouch(event));
         findViewById(R.id.player_close).setOnClickListener(v -> finish());
+        nextCard = findViewById(R.id.player_next);
+        unlockBtn = findViewById(R.id.player_unlock);
+        findViewById(R.id.player_tracks).setOnClickListener(v -> { showTracks(); resetHideTimer(); });
+        findViewById(R.id.player_lock).setOnClickListener(v -> {
+            locked = true;
+            setControlsVisible(false);
+            Toast.makeText(this, "صفحه قفل شد", Toast.LENGTH_SHORT).show();
+        });
+        unlockBtn.setOnClickListener(v -> {
+            locked = false;
+            handler.removeCallbacks(hideUnlockRunnable);
+            unlockBtn.setVisibility(View.GONE);
+            setControlsVisible(true);
+            resetHideTimer();
+        });
+        findViewById(R.id.player_next_now).setOnClickListener(v -> playNextNow());
+        findViewById(R.id.player_next_cancel).setOnClickListener(v -> cancelNext(true));
         findViewById(R.id.player_root).post(() -> pressFx(findViewById(R.id.player_root)));
         playPauseButton.setOnClickListener(v -> {
             togglePlayPause();
@@ -274,6 +323,16 @@ public class PlayerActivity extends Activity {
         findViewById(R.id.player_forward10).setOnClickListener(v -> seekBy(10000));
         ccButton.setOnClickListener(v -> toggleSubtitles());
         findViewById(R.id.player_aspect).setOnClickListener(v -> cycleAspect());
+        final Button speedBtn = findViewById(R.id.player_speed);
+        final float[] rates = {1f, 1.25f, 1.5f, 2f, 0.5f, 0.75f};
+        final int[] ri = {0};
+        speedBtn.setOnClickListener(v -> {
+            ri[0] = (ri[0] + 1) % rates.length;
+            try { if (vlcPlayer != null) vlcPlayer.setRate(rates[ri[0]]); } catch (Throwable ignored) { }
+            float r = rates[ri[0]];
+            speedBtn.setText((r == (int) r ? String.valueOf((int) r) : String.valueOf(r)) + "x");
+            resetHideTimer();
+        });
         findViewById(R.id.player_retry).setOnClickListener(v -> retryPlayback());
 
         seekBar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
@@ -396,9 +455,13 @@ public class PlayerActivity extends Activity {
                 resetHideTimer();
                 if (subtitlesOn) selectVlcSubtitles();
                 break;
+            case MediaPlayer.Event.EndReached:
+                hideLoading();
+                updatePlayButton();
+                onEnded();
+                break;
             case MediaPlayer.Event.Paused:
             case MediaPlayer.Event.Stopped:
-            case MediaPlayer.Event.EndReached:
                 hideLoading();
                 updatePlayButton();
                 break;
@@ -784,6 +847,224 @@ public class PlayerActivity extends Activity {
             seekBar.setProgress((int) (pos * 1000 / dur));
         }
         updatePlayButton();
+        tickProgress(dur);
+    }
+
+    // ---------- continue watching / next episode ----------
+
+    private void tickProgress(long dur) {
+        try {
+            if (!resumeDone && dur > 0 && isPlaying()) {
+                resumeDone = true;
+                if (resumeMs > 10000 && resumeMs < dur - 30000) {
+                    seekTo(resumeMs);
+                    Toast.makeText(this, "ادامه از " + formatTime(resumeMs), Toast.LENGTH_SHORT).show();
+                }
+            }
+            if (resumeDone && isPlaying() && ++saveTick % 10 == 0) saveProgressNow();
+        } catch (Throwable ignored) { }
+    }
+
+    private void saveProgressNow() {
+        if (!resumeDone) return;
+        Progress.save(this, progKey, originalUrl, currentTitle,
+                getCurrentPosition(), getDuration(), metaJson);
+    }
+
+    private void onEnded() {
+        Progress.remove(this, progKey);
+        if (queue != null && queue.length() > 0 && nextCard != null
+                && nextCard.getVisibility() != View.VISIBLE) {
+            org.json.JSONObject n = queue.optJSONObject(0);
+            if (n == null) return;
+            ((TextView) findViewById(R.id.player_next_title)).setText(n.optString("title", ""));
+            nextCount = 6;
+            ((TextView) findViewById(R.id.player_next_now)).setText("همین الان (" + nextCount + ")");
+            nextCard.setAlpha(0f);
+            nextCard.setVisibility(View.VISIBLE);
+            nextCard.animate().alpha(1f).setDuration(220).start();
+            handler.removeCallbacks(nextTickRunnable);
+            handler.postDelayed(nextTickRunnable, 1000);
+        }
+    }
+
+    private void cancelNext(boolean clearQueue) {
+        handler.removeCallbacks(nextTickRunnable);
+        if (nextCard != null) nextCard.setVisibility(View.GONE);
+        if (clearQueue) queue = null;
+    }
+
+    private void playNextNow() {
+        try {
+            if (queue == null || queue.length() == 0) { cancelNext(true); return; }
+            org.json.JSONObject n = queue.optJSONObject(0);
+            org.json.JSONArray rest = new org.json.JSONArray();
+            for (int i = 1; i < queue.length(); i++) rest.put(queue.get(i));
+            cancelNext(false);
+            queue = rest;
+            String url = n.optString("url", "");
+            if (url.isEmpty()) return;
+            org.json.JSONObject m = n.optJSONObject("meta");
+            if (m == null) m = new org.json.JSONObject();
+            m.put("queue", rest);
+            m.put("key", n.optString("key", Progress.keyFor(url)));
+            metaJson = m.toString();
+            progKey = m.optString("key");
+            originalUrl = url;
+            currentTitle = n.optString("title", "");
+            titleView.setText(currentTitle);
+            resumeMs = Progress.get(this, progKey);
+            resumeDone = false;
+            saveTick = 0;
+            triedHttpVlc = false;
+            exoStarted = false;
+            releaseVlc();
+            releaseExo();
+            showLoading();
+            startVlc(originalUrl);
+        } catch (Throwable ignored) { }
+    }
+
+    // ---------- audio / subtitle tracks ----------
+
+    private TextView trackRow(String text, boolean on, Runnable click) {
+        TextView tv = new TextView(this);
+        tv.setText(text);
+        tv.setGravity(android.view.Gravity.CENTER);
+        tv.setTextColor(on ? 0xFFFFFFFF : 0xFFF6EFDC);
+        tv.setTextSize(14);
+        tv.setTypeface(null, android.graphics.Typeface.BOLD);
+        tv.setPadding(dpToPx(14), dpToPx(10), dpToPx(14), dpToPx(12));
+        tv.setBackgroundResource(on ? R.drawable.player_btn_play : R.drawable.player_btn_circle);
+        tv.setClickable(true);
+        android.widget.LinearLayout.LayoutParams lp = new android.widget.LinearLayout.LayoutParams(
+                android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT);
+        lp.setMargins(0, dpToPx(4), dpToPx(4), dpToPx(8));
+        tv.setLayoutParams(lp);
+        tv.setOnClickListener(v -> click.run());
+        return tv;
+    }
+
+    private TextView trackHead(String text) {
+        TextView tv = new TextView(this);
+        tv.setText(text);
+        tv.setTextColor(0xFFFFD60A);
+        tv.setTextSize(13);
+        tv.setTypeface(null, android.graphics.Typeface.BOLD);
+        tv.setPadding(0, dpToPx(8), 0, dpToPx(2));
+        return tv;
+    }
+
+    private void showTracks() {
+        if (!(useVlc && vlcPlayer != null)) {
+            Toast.makeText(this, "انتخاب صدا و زیرنویس فقط با پلیر VLC فعال است", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        final android.app.Dialog d = new android.app.Dialog(this, android.R.style.Theme_Translucent_NoTitleBar);
+        final android.widget.LinearLayout box = new android.widget.LinearLayout(this);
+        box.setOrientation(android.widget.LinearLayout.VERTICAL);
+        box.setPadding(dpToPx(16), dpToPx(12), dpToPx(12), dpToPx(12));
+        box.setBackgroundResource(R.drawable.player_card);
+        try {
+            MediaPlayer.TrackDescription[] au = vlcPlayer.getAudioTracks();
+            int curA = vlcPlayer.getAudioTrack();
+            if (au != null && au.length > 0) {
+                box.addView(trackHead("صدا"));
+                for (MediaPlayer.TrackDescription t : au) {
+                    final int id = t.id;
+                    if (id < 0) continue;
+                    box.addView(trackRow(t.name, id == curA, () -> { vlcPlayer.setAudioTrack(id); d.dismiss(); }));
+                }
+            }
+            MediaPlayer.TrackDescription[] sp = vlcPlayer.getSpuTracks();
+            int curS = vlcPlayer.getSpuTrack();
+            if (sp != null && sp.length > 0) {
+                box.addView(trackHead("زیرنویس"));
+                for (MediaPlayer.TrackDescription t : sp) {
+                    final int id = t.id;
+                    final boolean off = id < 0;
+                    box.addView(trackRow(off ? "خاموش" : t.name, id == curS, () -> {
+                        vlcPlayer.setSpuTrack(id);
+                        subtitlesOn = !off;
+                        ccButton.setBackgroundResource(subtitlesOn
+                                ? R.drawable.player_btn_cc_on : R.drawable.player_btn_cc_off);
+                        d.dismiss();
+                    }));
+                }
+            }
+        } catch (Throwable ignored) { }
+        box.addView(trackHead("هماهنگی زیرنویس"));
+        final android.widget.LinearLayout line = new android.widget.LinearLayout(this);
+        line.setOrientation(android.widget.LinearLayout.HORIZONTAL);
+        final TextView lab = new TextView(this);
+        lab.setTextColor(0xFFF6EFDC);
+        lab.setTextSize(14);
+        lab.setGravity(android.view.Gravity.CENTER);
+        lab.setTypeface(android.graphics.Typeface.MONOSPACE, android.graphics.Typeface.BOLD);
+        lab.setLayoutParams(new android.widget.LinearLayout.LayoutParams(0,
+                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        final long[] delay = {0};
+        try { delay[0] = vlcPlayer.getSpuDelay(); } catch (Throwable ignored) { }
+        final Runnable upd = () -> lab.setText(String.format(java.util.Locale.US, "%+.1f s", delay[0] / 1000000.0));
+        upd.run();
+        TextView minus = trackRow("-0.5", false, () -> {
+            delay[0] -= 500000; try { vlcPlayer.setSpuDelay(delay[0]); } catch (Throwable ignored) { } upd.run(); });
+        TextView plus = trackRow("+0.5", false, () -> {
+            delay[0] += 500000; try { vlcPlayer.setSpuDelay(delay[0]); } catch (Throwable ignored) { } upd.run(); });
+        minus.setLayoutParams(new android.widget.LinearLayout.LayoutParams(dpToPx(90),
+                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT));
+        plus.setLayoutParams(new android.widget.LinearLayout.LayoutParams(dpToPx(90),
+                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT));
+        line.addView(minus);
+        line.addView(lab);
+        line.addView(plus);
+        box.addView(line);
+        android.widget.ScrollView sv = new android.widget.ScrollView(this);
+        sv.addView(box);
+        d.setContentView(sv);
+        d.setCanceledOnTouchOutside(true);
+        try {
+            android.view.Window w = d.getWindow();
+            w.setBackgroundDrawable(new android.graphics.drawable.ColorDrawable(0x99000000));
+            int width = Math.min(getResources().getDisplayMetrics().widthPixels - dpToPx(32), dpToPx(420));
+            w.setLayout(width, android.view.ViewGroup.LayoutParams.WRAP_CONTENT);
+            w.setGravity(android.view.Gravity.CENTER);
+            w.setDimAmount(0.5f);
+        } catch (Throwable ignored) { }
+        d.show();
+    }
+
+    @Override
+    public void onBackPressed() {
+        if (locked) { showUnlock(); return; }
+        super.onBackPressed();
+    }
+
+    private void showUnlock() {
+        if (unlockBtn == null) return;
+        unlockBtn.setAlpha(0f);
+        unlockBtn.setVisibility(View.VISIBLE);
+        unlockBtn.animate().alpha(1f).setDuration(150).start();
+        handler.removeCallbacks(hideUnlockRunnable);
+        handler.postDelayed(hideUnlockRunnable, 2500);
+    }
+
+    /** Fade + slide, like the site's panels (no layout pass, only alpha/translation). */
+    private void animateBar(final View bar, boolean show, int offset) {
+        bar.animate().cancel();
+        if (show) {
+            if (bar.getVisibility() != View.VISIBLE) {
+                bar.setAlpha(0f);
+                bar.setTranslationY(offset);
+                bar.setVisibility(View.VISIBLE);
+            }
+            bar.animate().alpha(1f).translationY(0f).setDuration(220)
+                    .setInterpolator(new android.view.animation.DecelerateInterpolator()).start();
+        } else {
+            bar.animate().alpha(0f).translationY(offset).setDuration(180)
+                    .withEndAction(() -> { if (!controlsVisible) bar.setVisibility(View.GONE); }).start();
+        }
     }
 
     private void toggleControls() {
@@ -791,9 +1072,10 @@ public class PlayerActivity extends Activity {
     }
 
     private void setControlsVisible(boolean visible) {
+        if (locked && visible) return;
         controlsVisible = visible;
-        topBar.setVisibility(visible ? View.VISIBLE : View.GONE);
-        controlsBar.setVisibility(visible ? View.VISIBLE : View.GONE);
+        animateBar(topBar, visible, -dpToPx(24));
+        animateBar(controlsBar, visible, dpToPx(24));
         int marginPx = dpToPx(visible ? 170 : 32);
         if (subtitleView.getVisibility() == View.VISIBLE) {
             FrameLayout.LayoutParams lp =
@@ -1061,6 +1343,10 @@ public class PlayerActivity extends Activity {
     // on the root frame, and child views consume their touches
     // first, so a tap on a button does not become a gesture.
     private boolean onPlayerTouch(MotionEvent event) {
+        if (locked) {
+            if (event.getActionMasked() == MotionEvent.ACTION_UP) showUnlock();
+            return true;
+        }
         switch (event.getActionMasked()) {
             case MotionEvent.ACTION_POINTER_DOWN: {
                 // Second finger: start a pinch zoom and cancel any
@@ -1295,6 +1581,7 @@ public class PlayerActivity extends Activity {
     @Override
     protected void onPause() {
         super.onPause();
+        try { saveProgressNow(); } catch (Throwable ignored) { }
         try {
             if (useVlc && vlcPlayer != null && vlcPlayer.isPlaying()) vlcPlayer.pause();
             else if (exoPlayer != null && exoPlayer.isPlaying()) exoPlayer.pause();
@@ -1304,6 +1591,7 @@ public class PlayerActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        try { saveProgressNow(); } catch (Throwable ignored) { }
         handler.removeCallbacksAndMessages(null);
         releaseVlc();
         releaseExo();

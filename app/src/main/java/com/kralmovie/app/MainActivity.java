@@ -934,6 +934,12 @@ public class MainActivity extends Activity {
 
         @JavascriptInterface
         public void playNative(String url, String title) {
+            playNativeEx(url, title, "");
+        }
+
+        /** meta (JSON): {key, queue:[{url,title,key,meta}], ...}. Resumes from the saved position. */
+        @JavascriptInterface
+        public void playNativeEx(String url, String title, String meta) {
             runOnUiThread(() -> {
                 try {
                     long now = System.currentTimeMillis();
@@ -942,6 +948,17 @@ public class MainActivity extends Activity {
                     Intent intent = new Intent(MainActivity.this, PlayerActivity.class);
                     intent.putExtra("url", url);
                     intent.putExtra("title", title != null ? title : "");
+                    try {
+                        String key = null;
+                        if (meta != null && meta.length() > 1) {
+                            intent.putExtra("meta", meta);
+                            key = new JSONObject(meta).optString("key", null);
+                        }
+                        if (key == null || key.isEmpty()) key = Progress.keyFor(url);
+                        intent.putExtra("key", key);
+                        intent.putExtra("resume", Progress.get(MainActivity.this, key));
+                    } catch (Throwable ignored) {
+                    }
                     // Browser User-Agent: the CDN accepts the WebView
                     // player, so the native players should present
                     // the same UA instead of their library default.
@@ -960,6 +977,16 @@ public class MainActivity extends Activity {
                     // list and can try VLC/MX instead.
                 }
             });
+        }
+
+        @JavascriptInterface
+        public String getProgress() {
+            return Progress.listJson(MainActivity.this);
+        }
+
+        @JavascriptInterface
+        public void removeProgress(String key) {
+            Progress.remove(MainActivity.this, key);
         }
 
         /** Direct ACTION_VIEW intent to an external player (VLC/MX/...).
