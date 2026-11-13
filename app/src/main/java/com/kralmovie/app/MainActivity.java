@@ -20,6 +20,7 @@ import android.os.Build;
 import android.os.Bundle;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.Window;
 import android.view.WindowInsets;
 import android.view.WindowInsetsController;
 import android.view.WindowManager;
@@ -47,6 +48,7 @@ import android.widget.FrameLayout;
 
 public class MainActivity extends Activity {
     private WebView webView;
+    private android.webkit.ValueCallback<Uri[]> fileCb;
     private View customView;
     private WebChromeClient.CustomViewCallback customViewCallback;
     private FrameLayout fullscreenContainer;
@@ -980,6 +982,22 @@ public class MainActivity extends Activity {
         }
 
         @JavascriptInterface
+        public void setBars(String status, String nav, boolean lightTheme) {
+            try {
+                getSharedPreferences("toosh_ui", MODE_PRIVATE).edit()
+                        .putString("bar_s", status).putString("bar_n", nav)
+                        .putBoolean("bar_l", lightTheme).apply();
+            } catch (Throwable ignored) { }
+            runOnUiThread(() -> { if (!isPlayerFullscreen) applyBars(status, nav, lightTheme); });
+        }
+
+        @JavascriptInterface
+        public boolean isNightMode() {
+            return (getResources().getConfiguration().uiMode
+                    & Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES;
+        }
+
+        @JavascriptInterface
         public String getProgress() {
             return Progress.listJson(MainActivity.this);
         }
@@ -1721,6 +1739,47 @@ public class MainActivity extends Activity {
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN);
     }
 
+    /** Status bar + navigation bar follow the app theme (colours chosen by the web page). */
+    private void applyBars(String status, String nav, boolean lightTheme) {
+        try {
+            int s = android.graphics.Color.parseColor(status);
+            int n = android.graphics.Color.parseColor(nav);
+            Window w = getWindow();
+            w.addFlags(WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS);
+            w.setStatusBarColor(s);
+            w.setNavigationBarColor(n);
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                WindowInsetsController c = w.getInsetsController();
+                if (c != null) {
+                    int m = WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS
+                            | WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS;
+                    c.setSystemBarsAppearance(lightTheme ? m : 0, m);
+                }
+            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                View d = w.getDecorView();
+                int f = d.getSystemUiVisibility();
+                f = lightTheme ? (f | View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR)
+                        : (f & ~View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR);
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    f = lightTheme ? (f | View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR)
+                            : (f & ~View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR);
+                }
+                d.setSystemUiVisibility(f);
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private void applySavedBars() {
+        try {
+            SharedPreferences sp = getSharedPreferences("toosh_ui", MODE_PRIVATE);
+            String s = sp.getString("bar_s", null);
+            String n = sp.getString("bar_n", null);
+            if (s != null && n != null) applyBars(s, n, sp.getBoolean("bar_l", false));
+        } catch (Throwable ignored) {
+        }
+    }
+
     private void showSystemBars() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             getWindow().setDecorFitsSystemWindows(true);
@@ -1732,6 +1791,7 @@ public class MainActivity extends Activity {
             getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_VISIBLE);
         }
         getWindow().clearFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN);
+        applySavedBars();
     }
 
     private void notifyPlayerFullscreenExit() {
@@ -1742,10 +1802,26 @@ public class MainActivity extends Activity {
     }
 
     @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == 7001 && fileCb != null) {
+            Uri[] r = null;
+            try {
+                if (resultCode == RESULT_OK && data != null && data.getData() != null) {
+                    r = new Uri[]{data.getData()};
+                }
+            } catch (Throwable ignored) { }
+            fileCb.onReceiveValue(r);
+            fileCb = null;
+        }
+    }
+
+    @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
         showSystemBars();
+        applySavedBars();
         webView = findViewById(R.id.webview);
 
         WebSettings s = webView.getSettings();
@@ -1846,6 +1922,24 @@ public class MainActivity extends Activity {
         });
 
         webView.setWebChromeClient(new WebChromeClient() {
+            @Override
+            public boolean onShowFileChooser(WebView w, android.webkit.ValueCallback<Uri[]> cb,
+                                             FileChooserParams params) {
+                if (fileCb != null) fileCb.onReceiveValue(null);
+                fileCb = cb;
+                try {
+                    Intent i = new Intent(Intent.ACTION_GET_CONTENT);
+                    i.addCategory(Intent.CATEGORY_OPENABLE);
+                    i.setType("image/*");
+                    startActivityForResult(Intent.createChooser(i, "انتخاب عکس"), 7001);
+                    return true;
+                } catch (Throwable e) {
+                    fileCb = null;
+                    cb.onReceiveValue(null);
+                    return false;
+                }
+            }
+
             @Override
             public void onShowCustomView(View view, CustomViewCallback callback) {
                 if (customView != null) {
