@@ -1668,7 +1668,7 @@ public class MainActivity extends Activity {
     private void exitPlayerFullscreen() {
         isPlayerFullscreen = false;
         setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_PORTRAIT);
-        hideSystemBars(); // the whole app stays edge-to-edge
+        showSystemBars();
     }
 
     private void hideSystemBars() {
@@ -1717,12 +1717,8 @@ public class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        if (Build.VERSION.SDK_INT >= 28) {
-            getWindow().getAttributes().layoutInDisplayCutoutMode =
-                    WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
-        }
         setContentView(R.layout.activity_main);
-        hideSystemBars();
+        showSystemBars();
         webView = findViewById(R.id.webview);
 
         WebSettings s = webView.getSettings();
@@ -1860,7 +1856,7 @@ public class MainActivity extends Activity {
                 // unless the player bridge already did it (idempotent).
                 isPlayerFullscreen = false;
                 setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_PORTRAIT);
-                hideSystemBars();
+                showSystemBars();
                 notifyPlayerFullscreenExit();
             }
         });
@@ -1880,7 +1876,7 @@ public class MainActivity extends Activity {
         if (newConfig.orientation == Configuration.ORIENTATION_LANDSCAPE) {
             hideSystemBars();
         } else if (!isPlayerFullscreen) {
-            hideSystemBars();
+            showSystemBars();
         }
     }
 
@@ -1917,7 +1913,7 @@ public class MainActivity extends Activity {
     @Override
     public void onWindowFocusChanged(boolean hasFocus) {
         super.onWindowFocusChanged(hasFocus);
-        if (hasFocus) hideSystemBars();
+        if (hasFocus && isPlayerFullscreen) hideSystemBars();
     }
 
     @Override

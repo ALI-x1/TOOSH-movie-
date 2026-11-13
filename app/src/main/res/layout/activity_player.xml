@@ -291,10 +291,6 @@
         android:gravity="center"
         android:visibility="gone">
 
-        <com.kralmovie.app.LoadingView
-            android:layout_width="160dp"
-            android:layout_height="160dp" />
-
         <TextView
             android:id="@+id/player_loading_text"
             android:layout_width="wrap_content"

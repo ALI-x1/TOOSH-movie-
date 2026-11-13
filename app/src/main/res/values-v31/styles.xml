@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <!-- Android 12+ system splash: same dark colour, so it blends into the app. -->
-    <style name="AppTheme" parent="@android:style/Theme.NoTitleBar.Fullscreen">
+    <style name="AppTheme" parent="@android:style/Theme.NoTitleBar">
         <item name="android:windowBackground">@color/toosh_bg</item>
         <item name="android:colorBackground">@color/toosh_bg</item>
         <item name="android:statusBarColor">@color/toosh_bg</item>

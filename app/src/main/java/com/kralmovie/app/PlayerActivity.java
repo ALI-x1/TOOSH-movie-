@@ -188,6 +188,27 @@ public class PlayerActivity extends Activity {
     private boolean triedHttpExo = false;
     private boolean exoStarted = false;
 
+
+    /** Snappy press feedback (scale down + back) on every clickable control. */
+    @android.annotation.SuppressLint("ClickableViewAccessibility")
+    private void pressFx(View v) {
+        if (v instanceof android.view.ViewGroup) {
+            android.view.ViewGroup g = (android.view.ViewGroup) v;
+            for (int i = 0; i < g.getChildCount(); i++) pressFx(g.getChildAt(i));
+        }
+        if (v.getId() == R.id.player_root || !v.isClickable() || v.getBackground() == null) return;
+        v.setOnTouchListener((view, e) -> {
+            int a = e.getActionMasked();
+            if (a == MotionEvent.ACTION_DOWN) {
+                view.animate().scaleX(0.9f).scaleY(0.9f).setDuration(80).start();
+            } else if (a == MotionEvent.ACTION_UP || a == MotionEvent.ACTION_CANCEL) {
+                view.animate().scaleX(1f).scaleY(1f).setDuration(140)
+                        .setInterpolator(new android.view.animation.OvershootInterpolator(2f)).start();
+            }
+            return false;
+        });
+    }
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -244,6 +265,7 @@ public class PlayerActivity extends Activity {
 
         findViewById(R.id.player_root).setOnTouchListener((v, event) -> onPlayerTouch(event));
         findViewById(R.id.player_close).setOnClickListener(v -> finish());
+        findViewById(R.id.player_root).post(() -> pressFx(findViewById(R.id.player_root)));
         playPauseButton.setOnClickListener(v -> {
             togglePlayPause();
             resetHideTimer();
