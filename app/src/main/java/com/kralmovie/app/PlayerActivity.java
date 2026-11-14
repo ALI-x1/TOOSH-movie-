@@ -75,6 +75,385 @@ public class PlayerActivity extends Activity {
     private SurfaceView surfaceView;
     private SurfaceView subtitleSurface;
     private TextView subtitleView;
+    // ---------- subtitle look (colour / background / bold / size / position) ----------
+    private static final int[] SUB_COLORS = {0xFFFFFF, 0xFFE94B, 0x111111, 0x7CF28A, 0x6FD3FF, 0xFF8A65};
+    private static final String[] SUB_COLOR_NAMES = {"سفید", "زرد", "مشکی", "سبز", "آبی", "نارنجی"};
+    private static final int[] SUB_BG_ARGB = {0x00000000, 0x99000000, 0xFF000000, 0xE6FFFFFF};
+    private static final String[] SUB_BG_NAMES = {"بدون پس‌زمینه", "مشکی کم‌رنگ", "مشکی", "سفید"};
+    private static final String[] SUB_SIZE_NAMES = {"کوچک", "متوسط", "بزرگ"};
+    private static final int[] SUB_REL = {24, 16, 11};
+    private static final float[] SUB_SP = {16f, 20f, 27f};
+    private float subScale = 1f;
+    private float subDy = 0f;
+    private boolean subEdit = false;
+    private boolean editMoved = false;
+    private boolean editFresh = false;
+    private float editLastY = -1f;
+    private float editStartDist = 0f;
+    private float editBaseScale = 1f;
+    private float lastTouchY = 0f;
+    private TextView subEditHint;
+    private int sleepIdx = 0;
+    private final Runnable subLongPress = new Runnable() {
+        @Override public void run() { enterSubEdit(); }
+    };
+    private final Runnable subEditExit = new Runnable() {
+        @Override public void run() { exitSubEdit(); }
+    };
+    private final Runnable sleepRunnable = new Runnable() {
+        @Override public void run() {
+            pausePlayback();
+            sleepIdx = 0;
+            Toast.makeText(PlayerActivity.this, "تایمر خواب: پخش متوقف شد", Toast.LENGTH_LONG).show();
+        }
+    };
+
+    private android.content.SharedPreferences ui() {
+        return getSharedPreferences("toosh_ui", MODE_PRIVATE);
+    }
+
+    private int prefIdx(String key, int def, int max) {
+        try { return Math.max(0, Math.min(max, ui().getInt(key, def))); }
+        catch (Throwable t) { return def; }
+    }
+
+    private int subColorIdx() { return prefIdx("sub_color", 0, SUB_COLORS.length - 1); }
+    private int subSizeIdx() { return prefIdx("sub_size", 1, SUB_SP.length - 1); }
+    private int subBgIdx() { return prefIdx("sub_bg", 0, SUB_BG_ARGB.length - 1); }
+    private boolean subBold() {
+        try { return ui().getBoolean("sub_bold", false); } catch (Throwable t) { return false; }
+    }
+
+    private void loadSubPrefs() {
+        try {
+            subScale = ui().getFloat("sub_scale", 1f);
+            subDy = ui().getFloat("sub_dy", 0f);
+        } catch (Throwable ignored) { }
+        subtitleSurface.post(new Runnable() {
+            @Override public void run() { applySubTransform(); }
+        });
+    }
+
+    private void saveSubTransform() {
+        try { ui().edit().putFloat("sub_scale", subScale).putFloat("sub_dy", subDy).apply(); }
+        catch (Throwable ignored) { }
+    }
+
+    /** Applies the saved look to the ExoPlayer fallback text view (libVLC takes it as start options). */
+    private void applySubStyleToView() {
+        try {
+            subtitleView.setTextColor(0xFF000000 | SUB_COLORS[subColorIdx()]);
+            subtitleView.setTextSize(SUB_SP[subSizeIdx()]);
+            subtitleView.setTypeface(null, subBold()
+                    ? android.graphics.Typeface.BOLD : android.graphics.Typeface.NORMAL);
+            int bg = SUB_BG_ARGB[subBgIdx()];
+            subtitleView.setBackgroundColor(bg);
+            int p = bg == 0 ? 0 : dpToPx(6);
+            subtitleView.setPadding(p, p / 2, p, p / 2);
+        } catch (Throwable ignored) { }
+    }
+
+    /** Size + vertical position of the subtitles, live, for both engines (view transform). */
+    private void applySubTransform() {
+        try {
+            int h = getResources().getDisplayMetrics().heightPixels;
+            float maxUp = -h * 0.55f, maxDown = h * 0.12f;
+            if (subDy < maxUp) subDy = maxUp;
+            if (subDy > maxDown) subDy = maxDown;
+            if (subScale < 0.6f) subScale = 0.6f;
+            if (subScale > 2.6f) subScale = 2.6f;
+            subtitleSurface.setPivotX(subtitleSurface.getWidth() / 2f);
+            subtitleSurface.setPivotY(subtitleSurface.getHeight() * 0.95f);
+            subtitleSurface.setScaleX(subScale);
+            subtitleSurface.setScaleY(subScale);
+            subtitleSurface.setTranslationY(subDy);
+            subtitleView.setPivotX(subtitleView.getWidth() / 2f);
+            subtitleView.setPivotY(subtitleView.getHeight());
+            subtitleView.setScaleX(subScale);
+            subtitleView.setScaleY(subScale);
+            subtitleView.setTranslationY(subDy);
+        } catch (Throwable ignored) { }
+    }
+
+    /** Saves a new look. libVLC reads its subtitle options only at start, so restart at the same spot. */
+    private void commitSubStyle(int size, int color, int bg, boolean bold) {
+        try {
+            ui().edit().putInt("sub_size", size).putInt("sub_color", color)
+                    .putInt("sub_bg", bg).putBoolean("sub_bold", bold).apply();
+        } catch (Throwable ignored) { }
+        applySubStyleToView();
+        if (useVlc && vlcPlayer != null && originalUrl != null) {
+            try {
+                long pos = vlcPlayer.getTime();
+                if (pos > 0) { resumeMs = pos; resumeDone = false; }
+                Toast.makeText(this, "در حال اعمال استایل زیرنویس…", Toast.LENGTH_SHORT).show();
+                releaseVlc();
+                startVlc(originalUrl);
+            } catch (Throwable ignored) { }
+        }
+    }
+
+    private void enterSubEdit() {
+        if (subEdit || locked) return;
+        subEdit = true;
+        editMoved = false;
+        editFresh = false;
+        editLastY = lastTouchY;
+        editStartDist = 0f;
+        gestureMode = 0;
+        gestureSeekTarget = -1;
+        try { getWindow().getDecorView().performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS); }
+        catch (Throwable ignored) { }
+        try { setControlsVisible(false); } catch (Throwable ignored) { }
+        try {
+            if (subEditHint == null) {
+                subEditHint = new TextView(this);
+                subEditHint.setText("بکشید تا زیرنویس جابه‌جا شود  ·  با دو انگشت بزرگ/کوچک کنید  ·  یک لمس = پایان");
+                subEditHint.setTextColor(0xFFF6EFDC);
+                subEditHint.setTextSize(12);
+                subEditHint.setTypeface(null, android.graphics.Typeface.BOLD);
+                subEditHint.setGravity(android.view.Gravity.CENTER);
+                subEditHint.setPadding(dpToPx(16), dpToPx(8), dpToPx(16), dpToPx(9));
+                subEditHint.setBackgroundResource(R.drawable.player_time_pill);
+                FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
+                        FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT,
+                        android.view.Gravity.TOP | android.view.Gravity.CENTER_HORIZONTAL);
+                lp.topMargin = dpToPx(14);
+                ((FrameLayout) findViewById(android.R.id.content)).addView(subEditHint, lp);
+            }
+            subEditHint.setAlpha(0f);
+            subEditHint.setVisibility(View.VISIBLE);
+            subEditHint.animate().alpha(1f).setDuration(180).start();
+        } catch (Throwable ignored) { }
+        handler.removeCallbacks(subEditExit);
+        handler.postDelayed(subEditExit, 6000);
+    }
+
+    private void exitSubEdit() {
+        if (!subEdit) return;
+        subEdit = false;
+        handler.removeCallbacks(subEditExit);
+        saveSubTransform();
+        try { if (subEditHint != null) subEditHint.setVisibility(View.GONE); } catch (Throwable ignored) { }
+    }
+
+    private boolean onSubEditTouch(MotionEvent e) {
+        switch (e.getActionMasked()) {
+            case MotionEvent.ACTION_DOWN:
+                downX = e.getX();
+                downY = e.getY();
+                editLastY = e.getY();
+                editMoved = false;
+                editFresh = true;
+                handler.removeCallbacks(subEditExit);
+                return true;
+            case MotionEvent.ACTION_POINTER_DOWN:
+                if (e.getPointerCount() >= 2) {
+                    editStartDist = pinchDistance(e);
+                    editBaseScale = subScale;
+                    editMoved = true;
+                }
+                return true;
+            case MotionEvent.ACTION_POINTER_UP:
+                editLastY = -1f;
+                return true;
+            case MotionEvent.ACTION_MOVE: {
+                if (e.getPointerCount() >= 2) {
+                    if (editStartDist > 0f) {
+                        subScale = editBaseScale * (pinchDistance(e) / editStartDist);
+                        applySubTransform();
+                        showGesture("اندازه‌ی زیرنویس " + Math.round(subScale * 100) + "٪");
+                    }
+                    return true;
+                }
+                float y = e.getY();
+                if (editLastY < 0f) { editLastY = y; return true; }
+                if (Math.abs(e.getX() - downX) > 20 || Math.abs(y - downY) > 20) editMoved = true;
+                if (editMoved || !editFresh) {
+                    subDy += y - editLastY;
+                    applySubTransform();
+                }
+                editLastY = y;
+                return true;
+            }
+            case MotionEvent.ACTION_UP:
+            case MotionEvent.ACTION_CANCEL:
+                handler.removeCallbacks(subEditExit);
+                if (e.getActionMasked() == MotionEvent.ACTION_UP && editFresh && !editMoved) {
+                    exitSubEdit();
+                } else {
+                    saveSubTransform();
+                    handler.postDelayed(subEditExit, 5000);
+                }
+                editFresh = false;
+                editLastY = -1f;
+                return true;
+            default:
+                return true;
+        }
+    }
+
+    // ---------- audio focus, headphones, sleep timer ----------
+    private final AudioManager.OnAudioFocusChangeListener focusListener =
+            new AudioManager.OnAudioFocusChangeListener() {
+                @Override public void onAudioFocusChange(int change) {
+                    if (change == AudioManager.AUDIOFOCUS_LOSS
+                            || change == AudioManager.AUDIOFOCUS_LOSS_TRANSIENT) pausePlayback();
+                }
+            };
+    private final android.content.BroadcastReceiver noisyReceiver = new android.content.BroadcastReceiver() {
+        @Override public void onReceive(Context c, android.content.Intent i) { pausePlayback(); }
+    };
+    private boolean noisyRegistered = false;
+
+    private void pausePlayback() {
+        try {
+            if (useVlc && vlcPlayer != null) { if (vlcPlayer.isPlaying()) vlcPlayer.pause(); }
+            else if (exoPlayer != null && exoPlayer.isPlaying()) exoPlayer.pause();
+        } catch (Throwable ignored) { }
+        try { updatePlayButton(); } catch (Throwable ignored) { }
+    }
+
+    private void setSleep(int idx) {
+        sleepIdx = idx;
+        handler.removeCallbacks(sleepRunnable);
+        int[] mins = {0, 15, 30, 60};
+        if (idx > 0 && idx < mins.length) {
+            handler.postDelayed(sleepRunnable, mins[idx] * 60000L);
+            Toast.makeText(this, "پخش بعد از " + mins[idx] + " دقیقه متوقف می‌شود", Toast.LENGTH_SHORT).show();
+        } else {
+            Toast.makeText(this, "تایمر خواب خاموش شد", Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    private android.app.Dialog newPanel(final LinearLayout box) {
+        final android.app.Dialog d = new android.app.Dialog(this, android.R.style.Theme_Translucent_NoTitleBar);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(dpToPx(16), dpToPx(12), dpToPx(12), dpToPx(12));
+        box.setBackgroundResource(R.drawable.player_card);
+        android.widget.ScrollView sv = new android.widget.ScrollView(this);
+        sv.addView(box);
+        d.setContentView(sv);
+        d.setCanceledOnTouchOutside(true);
+        try {
+            android.view.Window w = d.getWindow();
+            w.setBackgroundDrawable(new android.graphics.drawable.ColorDrawable(0x99000000));
+            int width = Math.min(getResources().getDisplayMetrics().widthPixels - dpToPx(32), dpToPx(420));
+            w.setLayout(width, android.view.ViewGroup.LayoutParams.WRAP_CONTENT);
+            w.setGravity(android.view.Gravity.CENTER);
+            w.setDimAmount(0.5f);
+        } catch (Throwable ignored) { }
+        return d;
+    }
+
+    /** Rows of selectable chips. cur[0] holds the selected index; onChange runs after every pick. */
+    private View chipGroup(final String[] names, final int[] cur, final int perRow, final int[] colors, final Runnable onChange) {
+        final LinearLayout col = new LinearLayout(this);
+        col.setOrientation(LinearLayout.VERTICAL);
+        final ArrayList<TextView> chips = new ArrayList<>();
+        final Runnable refresh = new Runnable() {
+            @Override public void run() {
+                for (int k = 0; k < chips.size(); k++) {
+                    boolean on = k == cur[0];
+                    chips.get(k).setBackgroundResource(on ? R.drawable.player_btn_play : R.drawable.player_btn_circle);
+                }
+            }
+        };
+        LinearLayout row = null;
+        for (int i = 0; i < names.length; i++) {
+            if (i % perRow == 0) {
+                row = new LinearLayout(this);
+                row.setOrientation(LinearLayout.HORIZONTAL);
+                col.addView(row);
+            }
+            final int ci = i;
+            final TextView c = trackRow(names[i], false, new Runnable() { @Override public void run() { } });
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+            lp.setMargins(dpToPx(3), dpToPx(3), dpToPx(3), dpToPx(4));
+            c.setLayoutParams(lp);
+            c.setPadding(dpToPx(6), dpToPx(9), dpToPx(6), dpToPx(10));
+            if (colors != null) {
+                int col2 = colors[i] & 0xFFFFFF;
+                c.setTextColor(col2 < 0x404040 ? 0xFFCCCCCC : (0xFF000000 | col2));
+            }
+            c.setOnClickListener(new View.OnClickListener() {
+                @Override public void onClick(View v) {
+                    cur[0] = ci;
+                    refresh.run();
+                    if (onChange != null) onChange.run();
+                }
+            });
+            chips.add(c);
+            row.addView(c);
+        }
+        refresh.run();
+        return col;
+    }
+
+    private void showSubStyle() {
+        final LinearLayout box = new LinearLayout(this);
+        final android.app.Dialog d = newPanel(box);
+        final int[] size = {subSizeIdx()}, color = {subColorIdx()}, bg = {subBgIdx()}, bold = {subBold() ? 1 : 0};
+        final int o0 = size[0], o1 = color[0], o2 = bg[0], o3 = bold[0];
+        final TextView prev = new TextView(this);
+        prev.setText("نمونه‌ی زیرنویس · Sample");
+        prev.setGravity(android.view.Gravity.CENTER);
+        final Runnable upd = new Runnable() {
+            @Override public void run() {
+                prev.setTextColor(0xFF000000 | SUB_COLORS[color[0]]);
+                prev.setTextSize(SUB_SP[size[0]]);
+                prev.setTypeface(null, bold[0] == 1 ? android.graphics.Typeface.BOLD : android.graphics.Typeface.NORMAL);
+                prev.setBackgroundColor(SUB_BG_ARGB[bg[0]]);
+                int p = bg[0] == 0 ? 0 : dpToPx(6);
+                prev.setPadding(p, p / 2, p, p / 2);
+            }
+        };
+        upd.run();
+        final FrameLayout stage = new FrameLayout(this);
+        stage.setBackgroundColor(0xFF3A342C);
+        stage.setPadding(dpToPx(12), dpToPx(22), dpToPx(12), dpToPx(22));
+        stage.addView(prev, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT, android.view.Gravity.CENTER));
+        box.addView(trackHead("پیش‌نمایش"));
+        box.addView(stage);
+        box.addView(trackHead("اندازه"));
+        box.addView(chipGroup(SUB_SIZE_NAMES, size, 3, null, upd));
+        box.addView(trackHead("رنگ نوشته"));
+        box.addView(chipGroup(SUB_COLOR_NAMES, color, 3, SUB_COLORS, upd));
+        box.addView(trackHead("پس‌زمینه"));
+        box.addView(chipGroup(SUB_BG_NAMES, bg, 2, null, upd));
+        final TextView boldRow = trackRow(bold[0] == 1 ? "نوشته‌ی ضخیم: روشن" : "نوشته‌ی ضخیم: خاموش", bold[0] == 1, new Runnable() { @Override public void run() { } });
+        boldRow.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                bold[0] = 1 - bold[0];
+                boldRow.setText(bold[0] == 1 ? "نوشته‌ی ضخیم: روشن" : "نوشته‌ی ضخیم: خاموش");
+                boldRow.setBackgroundResource(bold[0] == 1 ? R.drawable.player_btn_play : R.drawable.player_btn_circle);
+                upd.run();
+            }
+        });
+        box.addView(boldRow);
+        box.addView(trackRow("بازنشانی اندازه و جای زیرنویس", false, new Runnable() {
+            @Override public void run() {
+                subScale = 1f; subDy = 0f;
+                applySubTransform(); saveSubTransform();
+                Toast.makeText(PlayerActivity.this, "زیرنویس به حالت اول برگشت", Toast.LENGTH_SHORT).show();
+            }
+        }));
+        final TextView tip = new TextView(this);
+        tip.setText("حین پخش: روی صفحه نگه دارید، بعد بکشید تا زیرنویس بالا/پایین برود، یا با دو انگشت بزرگ و کوچکش کنید.");
+        tip.setTextColor(0xB3F6EFDC);
+        tip.setTextSize(12);
+        tip.setPadding(0, dpToPx(8), 0, dpToPx(4));
+        box.addView(tip);
+        d.setOnDismissListener(new android.content.DialogInterface.OnDismissListener() {
+            @Override public void onDismiss(android.content.DialogInterface di) {
+                if (size[0] != o0 || color[0] != o1 || bg[0] != o2 || bold[0] != o3)
+                    commitSubStyle(size[0], color[0], bg[0], bold[0] == 1);
+            }
+        });
+        d.show();
+    }
+
     private TextView titleView;
     private TextView timeView;
     private TextView timeTotalView;
@@ -265,6 +644,8 @@ public class PlayerActivity extends Activity {
         surfaceView = findViewById(R.id.player_surface);
         subtitleSurface = findViewById(R.id.player_subtitle_surface);
         subtitleView = findViewById(R.id.player_subtitle);
+        applySubStyleToView();
+        loadSubPrefs();
         titleView = findViewById(R.id.player_title);
         timeView = findViewById(R.id.player_time);
         timeTotalView = findViewById(R.id.player_time_total);
@@ -292,6 +673,15 @@ public class PlayerActivity extends Activity {
             }
         } catch (Throwable ignored) {
         }
+
+        try { getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON); } catch (Throwable ignored) { }
+        try {
+            if (audioManager != null) {
+                audioManager.requestAudioFocus(focusListener, AudioManager.STREAM_MUSIC, AudioManager.AUDIOFOCUS_GAIN);
+            }
+            registerReceiver(noisyReceiver, new android.content.IntentFilter(AudioManager.ACTION_AUDIO_BECOMING_NOISY));
+            noisyRegistered = true;
+        } catch (Throwable ignored) { }
 
         if (title != null) titleView.setText(title);
 
@@ -322,6 +712,7 @@ public class PlayerActivity extends Activity {
         findViewById(R.id.player_back10).setOnClickListener(v -> seekBy(-10000));
         findViewById(R.id.player_forward10).setOnClickListener(v -> seekBy(10000));
         ccButton.setOnClickListener(v -> toggleSubtitles());
+        ccButton.setOnLongClickListener(v -> { showSubStyle(); return true; });
         findViewById(R.id.player_aspect).setOnClickListener(v -> cycleAspect());
         final Button speedBtn = findViewById(R.id.player_speed);
         final float[] rates = {1f, 1.25f, 1.5f, 2f, 0.5f, 0.75f};
@@ -396,12 +787,27 @@ public class PlayerActivity extends Activity {
         try {
             ArrayList<String> options = new ArrayList<>();
             options.add("--no-video-title-show");
-            options.add("--network-caching=5000");
+            options.add("--network-caching=3000");
             options.add("--no-stats");
             if (userAgent != null && !userAgent.isEmpty()) {
                 options.add("--http-user-agent=" + userAgent);
             }
-            vlcLib = new LibVLC(this, options);
+            ArrayList<String> styled = new ArrayList<>(options);
+            styled.add("--http-reconnect");
+            styled.add("--freetype-color=" + (SUB_COLORS[subColorIdx()] & 0xFFFFFF));
+            styled.add("--freetype-rel-fontsize=" + SUB_REL[subSizeIdx()]);
+            if (subBold()) styled.add("--freetype-bold");
+            int bgArgb = SUB_BG_ARGB[subBgIdx()];
+            if ((bgArgb >>> 24) > 0) {
+                styled.add("--freetype-background-opacity=" + (bgArgb >>> 24));
+                styled.add("--freetype-background-color=" + (bgArgb & 0xFFFFFF));
+            }
+            try {
+                vlcLib = new LibVLC(this, styled);
+            } catch (Throwable styleFail) {
+                // An option this libVLC build does not know must never cost us the player.
+                vlcLib = new LibVLC(this, options);
+            }
             vlcPlayer = new MediaPlayer(vlcLib);
             vlcPlayer.getVLCVout().setVideoView(surfaceView);
             try {
@@ -726,6 +1132,7 @@ public class PlayerActivity extends Activity {
         } else {
             subtitleView.setText(sb.toString());
             subtitleView.setVisibility(View.VISIBLE);
+            applySubTransform();
         }
     }
 
@@ -841,12 +1248,14 @@ public class PlayerActivity extends Activity {
     private void updateProgress() {
         long pos = getCurrentPosition();
         long dur = getDuration();
-        timeView.setText(formatTime(pos));
-        timeTotalView.setText(formatTime(dur));
-        if (!seeking && dur > 0) {
-            seekBar.setProgress((int) (pos * 1000 / dur));
+        if (controlsVisible || seeking) {
+            timeView.setText(formatTime(pos));
+            timeTotalView.setText(formatTime(dur));
+            if (!seeking && dur > 0) {
+                seekBar.setProgress((int) (pos * 1000 / dur));
+            }
+            updatePlayButton();
         }
-        updatePlayButton();
         tickProgress(dur);
     }
 
@@ -994,6 +1403,10 @@ public class PlayerActivity extends Activity {
                 }
             }
         } catch (Throwable ignored) { }
+        box.addView(trackRow("ظاهر زیرنویس: رنگ، پس‌زمینه، اندازه…", false, () -> { d.dismiss(); showSubStyle(); }));
+        box.addView(trackHead("تایمر خواب"));
+        final int[] sl = {sleepIdx};
+        box.addView(chipGroup(new String[]{"خاموش", "۱۵ دقیقه", "۳۰ دقیقه", "۶۰ دقیقه"}, sl, 4, null, () -> setSleep(sl[0])));
         box.addView(trackHead("هماهنگی زیرنویس"));
         final android.widget.LinearLayout line = new android.widget.LinearLayout(this);
         line.setOrientation(android.widget.LinearLayout.HORIZONTAL);
@@ -1090,7 +1503,10 @@ public class PlayerActivity extends Activity {
             subtitleSurface.setLayoutParams(slp);
         } catch (Throwable ignored) {
         }
-        if (visible) resetHideTimer();
+        if (visible) {
+            updateProgress();
+            resetHideTimer();
+        }
     }
 
     private int dpToPx(int dp) {
@@ -1347,8 +1763,10 @@ public class PlayerActivity extends Activity {
             if (event.getActionMasked() == MotionEvent.ACTION_UP) showUnlock();
             return true;
         }
+        if (subEdit) return onSubEditTouch(event);
         switch (event.getActionMasked()) {
             case MotionEvent.ACTION_POINTER_DOWN: {
+                handler.removeCallbacks(subLongPress);
                 // Second finger: start a pinch zoom and cancel any
                 // single-finger volume/brightness/seek gesture, so a
                 // pinch never turns into a seek or volume change.
@@ -1380,6 +1798,11 @@ public class PlayerActivity extends Activity {
             case MotionEvent.ACTION_DOWN:
                 downX = event.getX();
                 downY = event.getY();
+                lastTouchY = downY;
+                handler.removeCallbacks(subLongPress);
+                if (downY > getResources().getDisplayMetrics().heightPixels * 0.3f) {
+                    handler.postDelayed(subLongPress, 520);
+                }
                 gestureMode = 0;
                 gestureSuppressed = false;
                 pinching = false;
@@ -1430,6 +1853,8 @@ public class PlayerActivity extends Activity {
                 }
                 float dx = event.getX() - downX;
                 float dy = event.getY() - downY;
+                lastTouchY = event.getY();
+                if (Math.abs(dx) > 24 || Math.abs(dy) > 24) handler.removeCallbacks(subLongPress);
                 int screenW = getResources().getDisplayMetrics().widthPixels;
                 int screenH = getResources().getDisplayMetrics().heightPixels;
                 if (gestureMode == 0) {
@@ -1470,6 +1895,7 @@ public class PlayerActivity extends Activity {
             }
             case MotionEvent.ACTION_UP:
             case MotionEvent.ACTION_CANCEL: {
+                handler.removeCallbacks(subLongPress);
                 if (pinching) {
                     // End of a pinch is not a tap: keep the zoom and
                     // do not toggle controls or seek.
@@ -1592,6 +2018,9 @@ public class PlayerActivity extends Activity {
     @Override
     protected void onDestroy() {
         try { saveProgressNow(); } catch (Throwable ignored) { }
+        try { saveSubTransform(); } catch (Throwable ignored) { }
+        try { if (noisyRegistered) unregisterReceiver(noisyReceiver); } catch (Throwable ignored) { }
+        try { if (audioManager != null) audioManager.abandonAudioFocus(focusListener); } catch (Throwable ignored) { }
         handler.removeCallbacksAndMessages(null);
         releaseVlc();
         releaseExo();

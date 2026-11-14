@@ -935,6 +935,11 @@ public class MainActivity extends Activity {
         private long lastPlayNativeMs = 0;
 
         @JavascriptInterface
+        public void exitApp() {
+            runOnUiThread(() -> finish());
+        }
+
+        @JavascriptInterface
         public void playNative(String url, String title) {
             playNativeEx(url, title, "");
         }
@@ -2013,9 +2018,18 @@ public class MainActivity extends Activity {
             notifyPlayerFullscreenExit();
             return;
         }
-        if (webView != null && webView.canGoBack()) {
-            webView.goBack();
-            return;
+        if (webView != null) {
+            // The web app decides first: close sheets/settings, go up a page, ask before exit.
+            try {
+                webView.evaluateJavascript(
+                        "(function(){try{return window.__tmBack?window.__tmBack():0}catch(e){return 0}})()",
+                        value -> {
+                            if ("1".equals(value)) return;
+                            if (webView.canGoBack()) webView.goBack();
+                            else finish();
+                        });
+                return;
+            } catch (Throwable ignored) { }
         }
         super.onBackPressed();
     }
