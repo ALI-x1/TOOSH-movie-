@@ -33,3 +33,7 @@ app/build/
 local.properties
 *.apk
 *.aab
+
+# Workspace metadata
+metadata.json
+bun.lock
