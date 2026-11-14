@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="ic_launcher_background">#100E0C</color>
-    <color name="toosh_bg">#100E0C</color>
+    <color name="bg_dark">#100E0C</color>
+    <color name="primary">#EE3B17</color>
+    <color name="accent">#FFD60A</color>
 </resources>

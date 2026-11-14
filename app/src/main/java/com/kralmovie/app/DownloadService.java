@@ -1,114 +1,189 @@
 package com.kralmovie.app;
 
-import android.app.Notification;
-import android.app.NotificationChannel;
-import android.app.NotificationManager;
-import android.app.Service;
+import android.app.DownloadManager;
+import android.content.Context;
 import android.content.Intent;
-import android.os.Build;
-import android.os.IBinder;
+import android.content.SharedPreferences;
+import android.database.Cursor;
+import android.net.Uri;
+import android.os.Environment;
 
-import androidx.core.app.NotificationCompat;
+import org.json.JSONArray;
+import org.json.JSONObject;
 
-import java.util.concurrent.ConcurrentHashMap;
+public class DownloadService {
+    private static final String PREF = "toosh_downloads_prefs";
+    private static final String KEY = "records";
 
-/**
- * v1.38: keep-alive foreground service ONLY.
- *
- * v1.37 moved the actual HTTP download into this service and
- * downloads stopped working (stuck at "connecting", then Retry).
- * The exact service-start failure could not be reproduced from
- * this VM, so v1.38 restores the proven v1.36 download path —
- * a plain thread in MainActivity — and uses this service only
- * for what a service is actually needed for: keeping the
- * process alive after the UI is closed, so that thread keeps
- * running in the background, plus holding the foreground
- * notification slot. If this service fails to start, the
- * download still works while the app is open (v1.36 behaviour);
- * only the background continuation is lost, instead of the
- * whole download. Progress notifications themselves are posted
- * by MainActivity's download thread, not by this service.
- */
-public class DownloadService extends Service {
-
-    public static final String ACTION_KEEP_ALIVE = "com.kralmovie.app.KEEP_ALIVE";
-    public static final String ACTION_CANCEL = "com.kralmovie.app.CANCEL_DOWNLOAD";
-    // Kept for compatibility with v1.37 callers; treated as keep-alive.
-    public static final String ACTION_START = "com.kralmovie.app.START_DOWNLOAD";
-    public static final String ACTION_RESUME = "com.kralmovie.app.RESUME_DOWNLOAD";
-
-    public static final String CHANNEL_ID = "kral_downloads";
-
-    private final ConcurrentHashMap<Long, String> alive = new ConcurrentHashMap<>();
-
-    @Override
-    public void onCreate() {
-        super.onCreate();
-        if (Build.VERSION.SDK_INT >= 26) {
-            try {
-                NotificationChannel ch = new NotificationChannel(
-                        CHANNEL_ID, "دانلودهای کرال‌مووی",
-                        NotificationManager.IMPORTANCE_LOW);
-                ch.setDescription("پیشرفت دانلود فیلم‌ها و سریال‌ها");
-                NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
-                if (nm != null) nm.createNotificationChannel(ch);
-            } catch (Throwable ignored) {
-            }
-        }
-    }
-
-    @Override
-    public int onStartCommand(Intent intent, int flags, int startId) {
-        if (intent == null) return START_NOT_STICKY;
-        String action = intent.getAction();
-        long id = intent.getLongExtra("id", -1);
-        if (ACTION_CANCEL.equals(action)) {
-            if (id > 0) {
-                alive.remove(id);
-                // v1.41: do NOT cancel the download's notification
-                // here. MainActivity already cancels it on delete,
-                // and cancelling here deleted the just-posted
-                // "download complete" notification, because it shares
-                // the download's notification id.
-            }
-            if (alive.isEmpty()) {
-                // stopForeground(false): drop foreground status but
-                // KEEP the notification, so a done notification
-                // posted by MainActivity stays in the shade.
-                try { stopForeground(false); } catch (Throwable ignored) {}
-                stopSelf();
-            }
-            return START_NOT_STICKY;
-        }
-        if (id <= 0) return START_NOT_STICKY;
-        // v1.41: if this download is already kept alive, do not
-        // re-post the static 0% notification — that overwrote the
-        // real progress notification and made it jump back to 0%.
-        if (alive.containsKey(id)) return START_NOT_STICKY;
-        String title = intent.getStringExtra("title");
-        if (title == null || title.isEmpty()) title = "در حال دانلود";
-        alive.put(id, title);
+    public static synchronized long startDownload(Context ctx, String jsonPayload) {
         try {
-            Notification n = new NotificationCompat.Builder(this, CHANNEL_ID)
-                    .setSmallIcon(android.R.drawable.stat_sys_download)
-                    .setContentTitle(title)
-                    .setContentText("در حال دانلود…")
-                    .setOngoing(true)
-                    .setOnlyAlertOnce(true)
-                    .setSilent(true)
-                    .setProgress(100, 0, false)
-                    .build();
-            startForeground((int) id, n);
-        } catch (Throwable ignored) {
-            // Keep-alive failed: the MainActivity download thread
-            // still runs while the app is open, so this is not
-            // fatal for the download itself.
+            JSONObject obj = new JSONObject(jsonPayload);
+            String url = obj.optString("url", "").trim();
+            String title = obj.optString("title", "TOOSH_Video");
+            String quality = obj.optString("quality", "");
+            String type = obj.optString("type", "movie");
+            if (url.isEmpty()) return -1;
+
+            String safeName = title.replaceAll("[\\\\/:*?\"<>|]", "_").trim();
+            if (safeName.isEmpty()) safeName = "TOOSH_Video";
+            String ext = ".mp4";
+            String cleanPath = url.split("\\?")[0].toLowerCase();
+            if (cleanPath.endsWith(".mkv")) ext = ".mkv";
+            else if (cleanPath.endsWith(".webm")) ext = ".webm";
+            String fileName = safeName + (quality.isEmpty() ? "" : "_" + quality.replaceAll("[^a-zA-Z0-9p]", "")) + ext;
+
+            DownloadManager dm = (DownloadManager) ctx.getSystemService(Context.DOWNLOAD_SERVICE);
+            if (dm == null) return -1;
+
+            DownloadManager.Request req = new DownloadManager.Request(Uri.parse(url));
+            req.setTitle(title);
+            req.setDescription("TOOSH MOVIE" + (quality.isEmpty() ? "" : " • " + quality));
+            req.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
+            req.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, "TOOSH/" + fileName);
+            req.allowScanningByMediaScanner();
+
+            long dmId = dm.enqueue(req);
+            saveRecord(ctx, dmId, url, title, quality, type, fileName);
+            return dmId;
+        } catch (Exception ignored) {
+            return -1;
         }
-        return START_NOT_STICKY;
     }
 
-    @Override
-    public IBinder onBind(Intent intent) {
-        return null;
+    private static void saveRecord(Context ctx, long dmId, String url, String title, String quality, String type, String fileName) {
+        try {
+            SharedPreferences sp = ctx.getSharedPreferences(PREF, Context.MODE_PRIVATE);
+            JSONArray arr = new JSONArray(sp.getString(KEY, "[]"));
+            JSONObject rec = new JSONObject();
+            rec.put("dmId", dmId);
+            rec.put("url", url);
+            rec.put("title", title);
+            rec.put("label", title);
+            rec.put("quality", quality);
+            rec.put("type", type);
+            rec.put("fileName", fileName);
+            rec.put("folder", "Download/TOOSH");
+            rec.put("createdAt", System.currentTimeMillis());
+
+            JSONArray next = new JSONArray();
+            next.put(rec);
+            for (int i = 0; i < arr.length(); i++) {
+                next.put(arr.opt(i));
+            }
+            sp.edit().putString(KEY, next.toString()).apply();
+        } catch (Exception ignored) {
+        }
+    }
+
+    public static synchronized String listDownloadsJson(Context ctx) {
+        try {
+            SharedPreferences sp = ctx.getSharedPreferences(PREF, Context.MODE_PRIVATE);
+            JSONArray arr = new JSONArray(sp.getString(KEY, "[]"));
+            DownloadManager dm = (DownloadManager) ctx.getSystemService(Context.DOWNLOAD_SERVICE);
+
+            for (int i = 0; i < arr.length(); i++) {
+                JSONObject rec = arr.optJSONObject(i);
+                if (rec == null || dm == null) continue;
+                long dmId = rec.optLong("dmId", -1);
+                if (dmId <= 0) continue;
+
+                DownloadManager.Query q = new DownloadManager.Query().setFilterById(dmId);
+                try (Cursor c = dm.query(q)) {
+                    if (c != null && c.moveToFirst()) {
+                        int st = c.getInt(c.getColumnIndexOrThrow(DownloadManager.COLUMN_STATUS));
+                        long downloaded = c.getLong(c.getColumnIndexOrThrow(DownloadManager.COLUMN_BYTES_DOWNLOADED_SO_FAR));
+                        long total = c.getLong(c.getColumnIndexOrThrow(DownloadManager.COLUMN_TOTAL_SIZE_BYTES));
+                        int reason = c.getInt(c.getColumnIndexOrThrow(DownloadManager.COLUMN_REASON));
+                        String statusStr = "running";
+                        if (st == DownloadManager.STATUS_SUCCESSFUL) statusStr = "successful";
+                        else if (st == DownloadManager.STATUS_FAILED) statusStr = "failed";
+                        else if (st == DownloadManager.STATUS_PAUSED) statusStr = "paused";
+                        else if (st == DownloadManager.STATUS_PENDING) statusStr = "pending";
+
+                        rec.put("status", statusStr);
+                        rec.put("downloaded", downloaded);
+                        rec.put("total", total);
+                        rec.put("reason", reason);
+                        rec.put("percent", total > 0 ? (int) Math.min(100, (downloaded * 100L) / total) : 0);
+                    }
+                } catch (Exception ignored) {
+                }
+            }
+            return arr.toString();
+        } catch (Exception ignored) {
+            return "[]";
+        }
+    }
+
+    public static synchronized boolean deleteDownload(Context ctx, long dmId) {
+        try {
+            DownloadManager dm = (DownloadManager) ctx.getSystemService(Context.DOWNLOAD_SERVICE);
+            if (dm != null && dmId > 0) {
+                dm.remove(dmId);
+            }
+            SharedPreferences sp = ctx.getSharedPreferences(PREF, Context.MODE_PRIVATE);
+            JSONArray arr = new JSONArray(sp.getString(KEY, "[]"));
+            JSONArray next = new JSONArray();
+            for (int i = 0; i < arr.length(); i++) {
+                JSONObject rec = arr.optJSONObject(i);
+                if (rec != null && rec.optLong("dmId", -1) != dmId) {
+                    next.put(rec);
+                }
+            }
+            sp.edit().putString(KEY, next.toString()).apply();
+            return true;
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
+    public static synchronized boolean resumeDownload(Context ctx, long dmId) {
+        try {
+            SharedPreferences sp = ctx.getSharedPreferences(PREF, Context.MODE_PRIVATE);
+            JSONArray arr = new JSONArray(sp.getString(KEY, "[]"));
+            for (int i = 0; i < arr.length(); i++) {
+                JSONObject rec = arr.optJSONObject(i);
+                if (rec != null && rec.optLong("dmId", -1) == dmId) {
+                    deleteDownload(ctx, dmId);
+                    return startDownload(ctx, rec.toString()) > 0;
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        return false;
+    }
+
+    public static synchronized boolean playDownloaded(Context ctx, long dmId) {
+        try {
+            DownloadManager dm = (DownloadManager) ctx.getSystemService(Context.DOWNLOAD_SERVICE);
+            if (dm == null) return false;
+            Uri uri = dm.getUriForDownloadedFile(dmId);
+            if (uri == null) return false;
+
+            String title = "پخش فایل دانلودشده";
+            try {
+                SharedPreferences sp = ctx.getSharedPreferences(PREF, Context.MODE_PRIVATE);
+                JSONArray arr = new JSONArray(sp.getString(KEY, "[]"));
+                for (int i = 0; i < arr.length(); i++) {
+                    JSONObject rec = arr.optJSONObject(i);
+                    if (rec != null && rec.optLong("dmId", -1) == dmId) {
+                        String t = rec.optString("title", "");
+                        if (!t.isEmpty()) title = t;
+                        break;
+                    }
+                }
+            } catch (Exception ignored) {
+            }
+
+            Intent intent = new Intent(ctx, PlayerActivity.class);
+            intent.putExtra("url", uri.toString());
+            intent.putExtra("title", title);
+            intent.putExtra("meta", "{}");
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            ctx.startActivity(intent);
+            return true;
+        } catch (Exception ignored) {
+            return false;
+        }
     }
 }

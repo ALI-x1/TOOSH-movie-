@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="fa" dir="rtl">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+    <meta name="theme-color" content="#100e0c" />
+    <style id="boot-css">
+      html{background:var(--bg,#100e0c)}
+      body{margin:0;background:var(--bg,#100e0c)}
+      #boot{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:20px;background:var(--bg,#100e0c)}
+      #boot b{font:400 46px/1 "Bebas Neue",Impact,sans-serif;letter-spacing:2px;color:#fff;background:var(--primary,#ee3b17);border:3px solid var(--ink,#f6efdc);box-shadow:4px 4px 0 var(--ink,#f6efdc);padding:3px 16px 0;transform:rotate(-2deg)}
+      #boot i{display:block;width:34px;height:34px;border:4px solid #f6efdc33;border-top-color:#ffd60a;border-right-color:#ee3b17;border-radius:50%;animation:boots .8s linear infinite}
+      @keyframes boots{to{transform:rotate(360deg)}}
+    </style>
+    <script>
+      (function(){
+        try{
+          for(var k of Object.keys(localStorage)){
+            if(k.indexOf("kral-")===0){
+              var n="toosh-"+k.slice(5);
+              if(localStorage.getItem(n)===null)localStorage.setItem(n,localStorage.getItem(k));
+            }
+          }
+        }catch(e){}
+        var ids=["dark","light","ocean","ocean-l","emerald","emerald-l","violet","violet-l","gold","gold-l"];
+        var t="dark";
+        try{
+          t=localStorage.getItem("toosh-theme-v2")||localStorage.getItem("kral-theme-v2")||"dark";
+          if(ids.indexOf(t)<0)t="dark";
+        }catch(e){t="dark"}
+        document.documentElement.setAttribute("data-theme",t);
+      })();
+    </script>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%23100E0C'/%3E%3Cpath d='M14 18h36v28H14zM22 18v28M42 18v28M14 27h8M14 37h8M42 27h8M42 37h8' fill='none' stroke='%23EE3B17' stroke-width='4' stroke-linejoin='round' stroke-linecap='round'/%3E%3C/svg%3E" />
+    <title>TOOSH MOVIE | سینمای جیبی شما</title>
+    <meta name="description" content="اپلیکیشن تماشای آنلاین و دانلود فیلم و سریال توش مووی (TOOSH MOVIE)" />
+    <meta property="og:title" content="TOOSH MOVIE | سینمای جیبی شما" />
+    <meta property="og:description" content="اپلیکیشن تماشای آنلاین و دانلود فیلم و سریال توش مووی (TOOSH MOVIE)" />
+    <meta property="og:type" content="website" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Lalezar&family=JetBrains+Mono:wght@600;800&family=Vazirmatn:wght@400;500;600;700;800;900&display=swap" rel="stylesheet" />
+  </head>
+  <body>
+    <div id="root"><div id="boot"><b>TOOSH</b><i></i></div></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

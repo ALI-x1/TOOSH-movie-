@@ -1,2029 +1,407 @@
 package com.kralmovie.app;
 
 import android.app.Activity;
-import android.content.Context;
-import android.content.pm.ActivityInfo;
-import android.graphics.Bitmap;
-import android.graphics.Canvas;
 import android.graphics.Color;
-import android.graphics.Paint;
-import android.graphics.Path;
-import android.graphics.PixelFormat;
-import android.graphics.RectF;
-import android.graphics.drawable.BitmapDrawable;
-import android.graphics.drawable.Drawable;
-import android.media.AudioManager;
-import android.net.Uri;
-import android.os.Build;
+import android.graphics.Typeface;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
-import android.provider.Settings;
-import android.util.DisplayMetrics;
-import android.view.MotionEvent;
-import android.view.View;
-import android.view.WindowInsets;
-import android.view.WindowInsetsController;
-import android.view.WindowManager;
+import android.util.TypedValue;
+import android.view.Gravity;
 import android.view.SurfaceView;
+import android.view.View;
+import android.view.WindowManager;
 import android.widget.Button;
-import android.widget.Toast;
-import android.widget.ImageButton;
-import android.widget.ImageView;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
+import android.widget.ProgressBar;
 import android.widget.SeekBar;
 import android.widget.TextView;
 
-import androidx.media3.common.C;
 import androidx.media3.common.MediaItem;
 import androidx.media3.common.PlaybackException;
 import androidx.media3.common.Player;
-import androidx.media3.common.TrackGroup;
-import androidx.media3.common.TrackSelectionOverride;
-import androidx.media3.common.Tracks;
-import androidx.media3.common.text.Cue;
-import androidx.media3.common.text.CueGroup;
+import androidx.media3.datasource.DefaultDataSource;
 import androidx.media3.datasource.DefaultHttpDataSource;
 import androidx.media3.exoplayer.ExoPlayer;
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory;
-import androidx.media3.exoplayer.trackselection.DefaultTrackSelector;
 
-import org.videolan.libvlc.LibVLC;
-import org.videolan.libvlc.Media;
-import org.videolan.libvlc.MediaPlayer;
+import java.util.Locale;
 
-import java.util.ArrayList;
-import java.util.List;
-
-/**
- * In-app player, VLC-style UI.
- *
- * Primary engine: libVLC (the engine behind VLC for Android, open
- * source, github.com/videolan/vlc-android). It demuxes MKV itself
- * and renders embedded subtitles on the video surface, exactly
- * like the VLC app does.
- *
- * Fallback engine: ExoPlayer, with the same UI, if libVLC cannot
- * load on this device or fails on the stream. ExoPlayer gets the
- * browser User-Agent and, on a source error, one automatic retry
- * over plain http (the same downgrade that made the external VLC
- * app work against this CDN's certificate).
- */
 public class PlayerActivity extends Activity {
-
+    private ExoPlayer player;
     private SurfaceView surfaceView;
-    private SurfaceView subtitleSurface;
-    private TextView subtitleView;
-    // ---------- subtitle look (colour / background / bold / size / position) ----------
-    private static final int[] SUB_COLORS = {0xFFFFFF, 0xFFE94B, 0x111111, 0x7CF28A, 0x6FD3FF, 0xFF8A65};
-    private static final String[] SUB_COLOR_NAMES = {"سفید", "زرد", "مشکی", "سبز", "آبی", "نارنجی"};
-    private static final int[] SUB_BG_ARGB = {0x00000000, 0x99000000, 0xFF000000, 0xE6FFFFFF};
-    private static final String[] SUB_BG_NAMES = {"بدون پس‌زمینه", "مشکی کم‌رنگ", "مشکی", "سفید"};
-    private static final String[] SUB_SIZE_NAMES = {"کوچک", "متوسط", "بزرگ"};
-    private static final int[] SUB_REL = {24, 16, 11};
-    private static final float[] SUB_SP = {16f, 20f, 27f};
-    private float subScale = 1f;
-    private float subDy = 0f;
-    private boolean subEdit = false;
-    private boolean editMoved = false;
-    private boolean editFresh = false;
-    private float editLastY = -1f;
-    private float editStartDist = 0f;
-    private float editBaseScale = 1f;
-    private float lastTouchY = 0f;
-    private TextView subEditHint;
-    private int sleepIdx = 0;
-    private final Runnable subLongPress = new Runnable() {
-        @Override public void run() { enterSubEdit(); }
-    };
-    private final Runnable subEditExit = new Runnable() {
-        @Override public void run() { exitSubEdit(); }
-    };
-    private final Runnable sleepRunnable = new Runnable() {
-        @Override public void run() {
-            pausePlayback();
-            sleepIdx = 0;
-            Toast.makeText(PlayerActivity.this, "تایمر خواب: پخش متوقف شد", Toast.LENGTH_LONG).show();
-        }
-    };
-
-    private android.content.SharedPreferences ui() {
-        return getSharedPreferences("toosh_ui", MODE_PRIVATE);
-    }
-
-    private int prefIdx(String key, int def, int max) {
-        try { return Math.max(0, Math.min(max, ui().getInt(key, def))); }
-        catch (Throwable t) { return def; }
-    }
-
-    private int subColorIdx() { return prefIdx("sub_color", 0, SUB_COLORS.length - 1); }
-    private int subSizeIdx() { return prefIdx("sub_size", 1, SUB_SP.length - 1); }
-    private int subBgIdx() { return prefIdx("sub_bg", 0, SUB_BG_ARGB.length - 1); }
-    private boolean subBold() {
-        try { return ui().getBoolean("sub_bold", false); } catch (Throwable t) { return false; }
-    }
-
-    private void loadSubPrefs() {
-        try {
-            subScale = ui().getFloat("sub_scale", 1f);
-            subDy = ui().getFloat("sub_dy", 0f);
-        } catch (Throwable ignored) { }
-        subtitleSurface.post(new Runnable() {
-            @Override public void run() { applySubTransform(); }
-        });
-    }
-
-    private void saveSubTransform() {
-        try { ui().edit().putFloat("sub_scale", subScale).putFloat("sub_dy", subDy).apply(); }
-        catch (Throwable ignored) { }
-    }
-
-    /** Applies the saved look to the ExoPlayer fallback text view (libVLC takes it as start options). */
-    private void applySubStyleToView() {
-        try {
-            subtitleView.setTextColor(0xFF000000 | SUB_COLORS[subColorIdx()]);
-            subtitleView.setTextSize(SUB_SP[subSizeIdx()]);
-            subtitleView.setTypeface(null, subBold()
-                    ? android.graphics.Typeface.BOLD : android.graphics.Typeface.NORMAL);
-            int bg = SUB_BG_ARGB[subBgIdx()];
-            subtitleView.setBackgroundColor(bg);
-            int p = bg == 0 ? 0 : dpToPx(6);
-            subtitleView.setPadding(p, p / 2, p, p / 2);
-        } catch (Throwable ignored) { }
-    }
-
-    /** Size + vertical position of the subtitles, live, for both engines (view transform). */
-    private void applySubTransform() {
-        try {
-            int h = getResources().getDisplayMetrics().heightPixels;
-            float maxUp = -h * 0.55f, maxDown = h * 0.12f;
-            if (subDy < maxUp) subDy = maxUp;
-            if (subDy > maxDown) subDy = maxDown;
-            if (subScale < 0.6f) subScale = 0.6f;
-            if (subScale > 2.6f) subScale = 2.6f;
-            subtitleSurface.setPivotX(subtitleSurface.getWidth() / 2f);
-            subtitleSurface.setPivotY(subtitleSurface.getHeight() * 0.95f);
-            subtitleSurface.setScaleX(subScale);
-            subtitleSurface.setScaleY(subScale);
-            subtitleSurface.setTranslationY(subDy);
-            subtitleView.setPivotX(subtitleView.getWidth() / 2f);
-            subtitleView.setPivotY(subtitleView.getHeight());
-            subtitleView.setScaleX(subScale);
-            subtitleView.setScaleY(subScale);
-            subtitleView.setTranslationY(subDy);
-        } catch (Throwable ignored) { }
-    }
-
-    /** Saves a new look. libVLC reads its subtitle options only at start, so restart at the same spot. */
-    private void commitSubStyle(int size, int color, int bg, boolean bold) {
-        try {
-            ui().edit().putInt("sub_size", size).putInt("sub_color", color)
-                    .putInt("sub_bg", bg).putBoolean("sub_bold", bold).apply();
-        } catch (Throwable ignored) { }
-        applySubStyleToView();
-        if (useVlc && vlcPlayer != null && originalUrl != null) {
-            try {
-                long pos = vlcPlayer.getTime();
-                if (pos > 0) { resumeMs = pos; resumeDone = false; }
-                Toast.makeText(this, "در حال اعمال استایل زیرنویس…", Toast.LENGTH_SHORT).show();
-                releaseVlc();
-                startVlc(originalUrl);
-            } catch (Throwable ignored) { }
-        }
-    }
-
-    private void enterSubEdit() {
-        if (subEdit || locked) return;
-        subEdit = true;
-        editMoved = false;
-        editFresh = false;
-        editLastY = lastTouchY;
-        editStartDist = 0f;
-        gestureMode = 0;
-        gestureSeekTarget = -1;
-        try { getWindow().getDecorView().performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS); }
-        catch (Throwable ignored) { }
-        try { setControlsVisible(false); } catch (Throwable ignored) { }
-        try {
-            if (subEditHint == null) {
-                subEditHint = new TextView(this);
-                subEditHint.setText("بکشید تا زیرنویس جابه‌جا شود  ·  با دو انگشت بزرگ/کوچک کنید  ·  یک لمس = پایان");
-                subEditHint.setTextColor(0xFFF6EFDC);
-                subEditHint.setTextSize(12);
-                subEditHint.setTypeface(null, android.graphics.Typeface.BOLD);
-                subEditHint.setGravity(android.view.Gravity.CENTER);
-                subEditHint.setPadding(dpToPx(16), dpToPx(8), dpToPx(16), dpToPx(9));
-                subEditHint.setBackgroundResource(R.drawable.player_time_pill);
-                FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
-                        FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT,
-                        android.view.Gravity.TOP | android.view.Gravity.CENTER_HORIZONTAL);
-                lp.topMargin = dpToPx(14);
-                ((FrameLayout) findViewById(android.R.id.content)).addView(subEditHint, lp);
-            }
-            subEditHint.setAlpha(0f);
-            subEditHint.setVisibility(View.VISIBLE);
-            subEditHint.animate().alpha(1f).setDuration(180).start();
-        } catch (Throwable ignored) { }
-        handler.removeCallbacks(subEditExit);
-        handler.postDelayed(subEditExit, 6000);
-    }
-
-    private void exitSubEdit() {
-        if (!subEdit) return;
-        subEdit = false;
-        handler.removeCallbacks(subEditExit);
-        saveSubTransform();
-        try { if (subEditHint != null) subEditHint.setVisibility(View.GONE); } catch (Throwable ignored) { }
-    }
-
-    private boolean onSubEditTouch(MotionEvent e) {
-        switch (e.getActionMasked()) {
-            case MotionEvent.ACTION_DOWN:
-                downX = e.getX();
-                downY = e.getY();
-                editLastY = e.getY();
-                editMoved = false;
-                editFresh = true;
-                handler.removeCallbacks(subEditExit);
-                return true;
-            case MotionEvent.ACTION_POINTER_DOWN:
-                if (e.getPointerCount() >= 2) {
-                    editStartDist = pinchDistance(e);
-                    editBaseScale = subScale;
-                    editMoved = true;
-                }
-                return true;
-            case MotionEvent.ACTION_POINTER_UP:
-                editLastY = -1f;
-                return true;
-            case MotionEvent.ACTION_MOVE: {
-                if (e.getPointerCount() >= 2) {
-                    if (editStartDist > 0f) {
-                        subScale = editBaseScale * (pinchDistance(e) / editStartDist);
-                        applySubTransform();
-                        showGesture("اندازه‌ی زیرنویس " + Math.round(subScale * 100) + "٪");
-                    }
-                    return true;
-                }
-                float y = e.getY();
-                if (editLastY < 0f) { editLastY = y; return true; }
-                if (Math.abs(e.getX() - downX) > 20 || Math.abs(y - downY) > 20) editMoved = true;
-                if (editMoved || !editFresh) {
-                    subDy += y - editLastY;
-                    applySubTransform();
-                }
-                editLastY = y;
-                return true;
-            }
-            case MotionEvent.ACTION_UP:
-            case MotionEvent.ACTION_CANCEL:
-                handler.removeCallbacks(subEditExit);
-                if (e.getActionMasked() == MotionEvent.ACTION_UP && editFresh && !editMoved) {
-                    exitSubEdit();
-                } else {
-                    saveSubTransform();
-                    handler.postDelayed(subEditExit, 5000);
-                }
-                editFresh = false;
-                editLastY = -1f;
-                return true;
-            default:
-                return true;
-        }
-    }
-
-    // ---------- audio focus, headphones, sleep timer ----------
-    private final AudioManager.OnAudioFocusChangeListener focusListener =
-            new AudioManager.OnAudioFocusChangeListener() {
-                @Override public void onAudioFocusChange(int change) {
-                    if (change == AudioManager.AUDIOFOCUS_LOSS
-                            || change == AudioManager.AUDIOFOCUS_LOSS_TRANSIENT) pausePlayback();
-                }
-            };
-    private final android.content.BroadcastReceiver noisyReceiver = new android.content.BroadcastReceiver() {
-        @Override public void onReceive(Context c, android.content.Intent i) { pausePlayback(); }
-    };
-    private boolean noisyRegistered = false;
-
-    private void pausePlayback() {
-        try {
-            if (useVlc && vlcPlayer != null) { if (vlcPlayer.isPlaying()) vlcPlayer.pause(); }
-            else if (exoPlayer != null && exoPlayer.isPlaying()) exoPlayer.pause();
-        } catch (Throwable ignored) { }
-        try { updatePlayButton(); } catch (Throwable ignored) { }
-    }
-
-    private void setSleep(int idx) {
-        sleepIdx = idx;
-        handler.removeCallbacks(sleepRunnable);
-        int[] mins = {0, 15, 30, 60};
-        if (idx > 0 && idx < mins.length) {
-            handler.postDelayed(sleepRunnable, mins[idx] * 60000L);
-            Toast.makeText(this, "پخش بعد از " + mins[idx] + " دقیقه متوقف می‌شود", Toast.LENGTH_SHORT).show();
-        } else {
-            Toast.makeText(this, "تایمر خواب خاموش شد", Toast.LENGTH_SHORT).show();
-        }
-    }
-
-    private android.app.Dialog newPanel(final LinearLayout box) {
-        final android.app.Dialog d = new android.app.Dialog(this, android.R.style.Theme_Translucent_NoTitleBar);
-        box.setOrientation(LinearLayout.VERTICAL);
-        box.setPadding(dpToPx(16), dpToPx(12), dpToPx(12), dpToPx(12));
-        box.setBackgroundResource(R.drawable.player_card);
-        android.widget.ScrollView sv = new android.widget.ScrollView(this);
-        sv.addView(box);
-        d.setContentView(sv);
-        d.setCanceledOnTouchOutside(true);
-        try {
-            android.view.Window w = d.getWindow();
-            w.setBackgroundDrawable(new android.graphics.drawable.ColorDrawable(0x99000000));
-            int width = Math.min(getResources().getDisplayMetrics().widthPixels - dpToPx(32), dpToPx(420));
-            w.setLayout(width, android.view.ViewGroup.LayoutParams.WRAP_CONTENT);
-            w.setGravity(android.view.Gravity.CENTER);
-            w.setDimAmount(0.5f);
-        } catch (Throwable ignored) { }
-        return d;
-    }
-
-    /** Rows of selectable chips. cur[0] holds the selected index; onChange runs after every pick. */
-    private View chipGroup(final String[] names, final int[] cur, final int perRow, final int[] colors, final Runnable onChange) {
-        final LinearLayout col = new LinearLayout(this);
-        col.setOrientation(LinearLayout.VERTICAL);
-        final ArrayList<TextView> chips = new ArrayList<>();
-        final Runnable refresh = new Runnable() {
-            @Override public void run() {
-                for (int k = 0; k < chips.size(); k++) {
-                    boolean on = k == cur[0];
-                    chips.get(k).setBackgroundResource(on ? R.drawable.player_btn_play : R.drawable.player_btn_circle);
-                }
-            }
-        };
-        LinearLayout row = null;
-        for (int i = 0; i < names.length; i++) {
-            if (i % perRow == 0) {
-                row = new LinearLayout(this);
-                row.setOrientation(LinearLayout.HORIZONTAL);
-                col.addView(row);
-            }
-            final int ci = i;
-            final TextView c = trackRow(names[i], false, new Runnable() { @Override public void run() { } });
-            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
-            lp.setMargins(dpToPx(3), dpToPx(3), dpToPx(3), dpToPx(4));
-            c.setLayoutParams(lp);
-            c.setPadding(dpToPx(6), dpToPx(9), dpToPx(6), dpToPx(10));
-            if (colors != null) {
-                int col2 = colors[i] & 0xFFFFFF;
-                c.setTextColor(col2 < 0x404040 ? 0xFFCCCCCC : (0xFF000000 | col2));
-            }
-            c.setOnClickListener(new View.OnClickListener() {
-                @Override public void onClick(View v) {
-                    cur[0] = ci;
-                    refresh.run();
-                    if (onChange != null) onChange.run();
-                }
-            });
-            chips.add(c);
-            row.addView(c);
-        }
-        refresh.run();
-        return col;
-    }
-
-    private void showSubStyle() {
-        final LinearLayout box = new LinearLayout(this);
-        final android.app.Dialog d = newPanel(box);
-        final int[] size = {subSizeIdx()}, color = {subColorIdx()}, bg = {subBgIdx()}, bold = {subBold() ? 1 : 0};
-        final int o0 = size[0], o1 = color[0], o2 = bg[0], o3 = bold[0];
-        final TextView prev = new TextView(this);
-        prev.setText("نمونه‌ی زیرنویس · Sample");
-        prev.setGravity(android.view.Gravity.CENTER);
-        final Runnable upd = new Runnable() {
-            @Override public void run() {
-                prev.setTextColor(0xFF000000 | SUB_COLORS[color[0]]);
-                prev.setTextSize(SUB_SP[size[0]]);
-                prev.setTypeface(null, bold[0] == 1 ? android.graphics.Typeface.BOLD : android.graphics.Typeface.NORMAL);
-                prev.setBackgroundColor(SUB_BG_ARGB[bg[0]]);
-                int p = bg[0] == 0 ? 0 : dpToPx(6);
-                prev.setPadding(p, p / 2, p, p / 2);
-            }
-        };
-        upd.run();
-        final FrameLayout stage = new FrameLayout(this);
-        stage.setBackgroundColor(0xFF3A342C);
-        stage.setPadding(dpToPx(12), dpToPx(22), dpToPx(12), dpToPx(22));
-        stage.addView(prev, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT,
-                FrameLayout.LayoutParams.WRAP_CONTENT, android.view.Gravity.CENTER));
-        box.addView(trackHead("پیش‌نمایش"));
-        box.addView(stage);
-        box.addView(trackHead("اندازه"));
-        box.addView(chipGroup(SUB_SIZE_NAMES, size, 3, null, upd));
-        box.addView(trackHead("رنگ نوشته"));
-        box.addView(chipGroup(SUB_COLOR_NAMES, color, 3, SUB_COLORS, upd));
-        box.addView(trackHead("پس‌زمینه"));
-        box.addView(chipGroup(SUB_BG_NAMES, bg, 2, null, upd));
-        final TextView boldRow = trackRow(bold[0] == 1 ? "نوشته‌ی ضخیم: روشن" : "نوشته‌ی ضخیم: خاموش", bold[0] == 1, new Runnable() { @Override public void run() { } });
-        boldRow.setOnClickListener(new View.OnClickListener() {
-            @Override public void onClick(View v) {
-                bold[0] = 1 - bold[0];
-                boldRow.setText(bold[0] == 1 ? "نوشته‌ی ضخیم: روشن" : "نوشته‌ی ضخیم: خاموش");
-                boldRow.setBackgroundResource(bold[0] == 1 ? R.drawable.player_btn_play : R.drawable.player_btn_circle);
-                upd.run();
-            }
-        });
-        box.addView(boldRow);
-        box.addView(trackRow("بازنشانی اندازه و جای زیرنویس", false, new Runnable() {
-            @Override public void run() {
-                subScale = 1f; subDy = 0f;
-                applySubTransform(); saveSubTransform();
-                Toast.makeText(PlayerActivity.this, "زیرنویس به حالت اول برگشت", Toast.LENGTH_SHORT).show();
-            }
-        }));
-        final TextView tip = new TextView(this);
-        tip.setText("حین پخش: روی صفحه نگه دارید، بعد بکشید تا زیرنویس بالا/پایین برود، یا با دو انگشت بزرگ و کوچکش کنید.");
-        tip.setTextColor(0xB3F6EFDC);
-        tip.setTextSize(12);
-        tip.setPadding(0, dpToPx(8), 0, dpToPx(4));
-        box.addView(tip);
-        d.setOnDismissListener(new android.content.DialogInterface.OnDismissListener() {
-            @Override public void onDismiss(android.content.DialogInterface di) {
-                if (size[0] != o0 || color[0] != o1 || bg[0] != o2 || bold[0] != o3)
-                    commitSubStyle(size[0], color[0], bg[0], bold[0] == 1);
-            }
-        });
-        d.show();
-    }
-
-    private TextView titleView;
-    private TextView timeView;
-    private TextView timeTotalView;
-    private TextView errorView;
-    private LinearLayout gestureBox;
-    private ImageView gestureIcon;
-    private TextView gestureText;
-    private LinearLayout errorBox;
-    private View loadingBox;
-    private TextView loadingText;
-    private int loadingDots = 0;
-    private final Runnable loadingDotsRunnable = new Runnable() {
-        @Override
-        public void run() {
-            if (loadingText != null && loadingBox != null
-                    && loadingBox.getVisibility() == View.VISIBLE) {
-                loadingDots = (loadingDots + 1) % 4;
-                StringBuilder dots = new StringBuilder();
-                for (int i = 0; i < loadingDots; i++) dots.append(".");
-                loadingText.setText("در حال بارگذاری فیلم" + dots.toString());
-                handler.postDelayed(this, 500);
-            }
-        }
-    };
+    private LinearLayout controlsOverlay;
+    private ProgressBar loadingSpinner;
     private SeekBar seekBar;
-    private ImageButton playPauseButton;
-    private Button ccButton;
-    private View topBar;
-    private View controlsBar;
+    private TextView timeText;
+    private TextView titleText;
+    private Button playPauseBtn;
+    private Button speedBtn;
+    private TextView errorText;
 
-    // Gestures (VLC-style)
-    private AudioManager audioManager;
-    private float downX, downY;
-    private int startVolume, maxVolume;
-    private float startBrightness = -1f;
-    private int gestureMode = 0; // 0 none, 1 volume, 2 brightness, 3 seek
-    private boolean gestureLeftSide;
-    private long gestureSeekTarget = -1;
-    private long lastTapTime = 0;
-    private float lastTapX = 0;
-    private final Runnable hideGestureRunnable = () -> {
-        if (gestureBox != null) gestureBox.setVisibility(View.GONE);
-    };
-    private int aspectIndex = 0;
-    private int lastVideoW = 0;
-    private int lastVideoH = 0;
-    private int lastSarNum = 0;
-    private int lastSarDen = 0;
-    // Pinch zoom: 1.0 = the current aspect mode's size. Pinching
-    // with two fingers scales the surface around its centre; the
-    // parent FrameLayout clips the overflow, so zooming in crops
-    // the edges instead of stretching the picture.
-    private float zoomScale = 1f;
-    private boolean pinching = false;
-    private float pinchStartDist = 0f;
-    private float pinchBaseZoom = 1f;
-    // Bug fix for pinch-then-seek: Android does NOT send a new
-    // ACTION_DOWN for the finger that stays down after the other
-    // finger lifts (ACTION_POINTER_UP). Without this flag, that
-    // finger's later movement is measured from the original
-    // downX/downY and becomes a horizontal seek, so a pinch
-    // would also jump the film forward/backward. While this is
-    // set, all moves are swallowed until a fresh ACTION_DOWN.
-    private boolean gestureSuppressed = false;
-    // v1.35: scale resolved lazily, only when VLC is playing.
-    private MediaPlayer.ScaleType vlcScaleFor(int index) {
-        switch (index) {
-            case 1: return MediaPlayer.ScaleType.SURFACE_FILL;
-            case 2: return MediaPlayer.ScaleType.SURFACE_16_9;
-            case 3: return MediaPlayer.ScaleType.SURFACE_4_3;
-            case 4: return MediaPlayer.ScaleType.SURFACE_BEST_FIT;
-            default: return MediaPlayer.ScaleType.SURFACE_BEST_FIT;
-        }
-    }
+    private String streamUrl = "";
+    private String videoTitle = "";
+    private String metaJson = "{}";
 
     private final Handler handler = new Handler(Looper.getMainLooper());
-    private final Runnable progressRunnable = new Runnable() {
+    private boolean isSeeking = false;
+    private boolean controlsVisible = true;
+    private int speedIdx = 0;
+    private final float[] speeds = new float[]{1.0f, 1.25f, 1.5f, 2.0f, 0.75f};
+
+    private final Runnable tickRunnable = new Runnable() {
         @Override
         public void run() {
-            updateProgress();
+            updatePlaybackUi();
             handler.postDelayed(this, 500);
         }
     };
-    private final Runnable hideControlsRunnable = new Runnable() {
-        @Override
-        public void run() {
-            setControlsVisible(false);
-        }
-    };
 
-    private boolean controlsVisible = true;
-    // continue-watching / next episode / lock
-    private String progKey, metaJson, currentTitle;
-    private long resumeMs;
-    private boolean resumeDone = false;
-    private int saveTick = 0;
-    private org.json.JSONArray queue;
-    private boolean locked = false;
-    private View nextCard, unlockBtn;
-    private int nextCount = 0;
-    private final Runnable nextTickRunnable = new Runnable() {
-        @Override public void run() {
-            nextCount--;
-            TextView b = findViewById(R.id.player_next_now);
-            if (nextCount <= 0) { playNextNow(); return; }
-            if (b != null) b.setText("همین الان (" + nextCount + ")");
-            handler.postDelayed(this, 1000);
-        }
-    };
-    private final Runnable hideUnlockRunnable = new Runnable() {
-        @Override public void run() { if (unlockBtn != null) unlockBtn.setVisibility(View.GONE); }
-    };
-    private boolean subtitlesOn = true;
-    private boolean seeking = false;
-
-    private String originalUrl;
-    private String userAgent;
-
-    // libVLC
-    private LibVLC vlcLib;
-    private MediaPlayer vlcPlayer;
-    // v1.37: for a downloaded film (content:// from MediaStore),
-    // VLC must be given a file descriptor, not the content Uri
-    // string — libVLC cannot open content:// as a network location.
-    // Kept open until releaseVlc() and closed there.
-    private android.content.res.AssetFileDescriptor contentFd;
-    private boolean useVlc = false;
-    private boolean triedHttpVlc = false;
-
-    // ExoPlayer fallback
-    private ExoPlayer exoPlayer;
-    private DefaultTrackSelector trackSelector;
-    private boolean triedHttpExo = false;
-    private boolean exoStarted = false;
-
-
-    /** Snappy press feedback (scale down + back) on every clickable control. */
-    @android.annotation.SuppressLint("ClickableViewAccessibility")
-    private void pressFx(View v) {
-        if (v instanceof android.view.ViewGroup) {
-            android.view.ViewGroup g = (android.view.ViewGroup) v;
-            for (int i = 0; i < g.getChildCount(); i++) pressFx(g.getChildAt(i));
-        }
-        if (v.getId() == R.id.player_root || !v.isClickable() || v.getBackground() == null) return;
-        v.setOnTouchListener((view, e) -> {
-            int a = e.getActionMasked();
-            if (a == MotionEvent.ACTION_DOWN) {
-                view.animate().scaleX(0.9f).scaleY(0.9f).setDuration(80).start();
-            } else if (a == MotionEvent.ACTION_UP || a == MotionEvent.ACTION_CANCEL) {
-                view.animate().scaleX(1f).scaleY(1f).setDuration(140)
-                        .setInterpolator(new android.view.animation.OvershootInterpolator(2f)).start();
-            }
-            return false;
-        });
-    }
+    private final Runnable hideRunnable = () -> setControlsVisible(false);
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        try {
-            setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE);
-        } catch (Throwable ignored) {
-        }
-        setContentView(R.layout.activity_player);
-        try {
-            hideSystemBars();
-        } catch (Throwable ignored) {
-        }
+        getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        hideSystemUi();
 
-        originalUrl = getIntent().getStringExtra("url");
-        String title = getIntent().getStringExtra("title");
-        userAgent = getIntent().getStringExtra("ua");
-        currentTitle = title;
-        progKey = getIntent().getStringExtra("key");
-        if (progKey == null || progKey.isEmpty()) progKey = Progress.keyFor(originalUrl);
+        streamUrl = getIntent().getStringExtra("url");
+        videoTitle = getIntent().getStringExtra("title");
         metaJson = getIntent().getStringExtra("meta");
-        resumeMs = getIntent().getLongExtra("resume", 0L);
-        try {
-            if (metaJson != null && metaJson.length() > 1) {
-                queue = new org.json.JSONObject(metaJson).optJSONArray("queue");
-            }
-        } catch (Throwable ignored) { }
-        if (originalUrl == null || originalUrl.isEmpty()) {
-            finish();
-            return;
-        }
+        if (streamUrl == null) streamUrl = "";
+        if (videoTitle == null) videoTitle = "TOOSH MOVIE";
+        if (metaJson == null) metaJson = "{}";
 
-        surfaceView = findViewById(R.id.player_surface);
-        subtitleSurface = findViewById(R.id.player_subtitle_surface);
-        subtitleView = findViewById(R.id.player_subtitle);
-        applySubStyleToView();
-        loadSubPrefs();
-        titleView = findViewById(R.id.player_title);
-        timeView = findViewById(R.id.player_time);
-        timeTotalView = findViewById(R.id.player_time_total);
-        errorView = findViewById(R.id.player_error);
-        gestureBox = findViewById(R.id.player_gesture);
-        gestureIcon = findViewById(R.id.player_gesture_icon);
-        gestureText = findViewById(R.id.player_gesture_text);
-        errorBox = findViewById(R.id.player_error_box);
-        loadingBox = findViewById(R.id.player_loading);
-        loadingText = findViewById(R.id.player_loading_text);
-        seekBar = findViewById(R.id.player_seekbar);
-        playPauseButton = findViewById(R.id.player_play_pause);
-        ccButton = findViewById(R.id.player_cc);
-        topBar = findViewById(R.id.player_topbar);
-        controlsBar = findViewById(R.id.player_controls);
-        try {
-            subtitleSurface.getHolder().setFormat(PixelFormat.TRANSLUCENT);
-            subtitleSurface.setZOrderMediaOverlay(true);
-        } catch (Throwable ignored) {
-        }
-        try {
-            audioManager = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
-            if (audioManager != null) {
-                maxVolume = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC);
-            }
-        } catch (Throwable ignored) {
-        }
+        buildUi();
+        initPlayer();
+    }
 
-        try { getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON); } catch (Throwable ignored) { }
-        try {
-            if (audioManager != null) {
-                audioManager.requestAudioFocus(focusListener, AudioManager.STREAM_MUSIC, AudioManager.AUDIOFOCUS_GAIN);
-            }
-            registerReceiver(noisyReceiver, new android.content.IntentFilter(AudioManager.ACTION_AUDIO_BECOMING_NOISY));
-            noisyRegistered = true;
-        } catch (Throwable ignored) { }
+    private void buildUi() {
+        FrameLayout root = new FrameLayout(this);
+        root.setBackgroundColor(Color.BLACK);
 
-        if (title != null) titleView.setText(title);
+        surfaceView = new SurfaceView(this);
+        root.addView(surfaceView, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                Gravity.CENTER
+        ));
 
-        findViewById(R.id.player_root).setOnTouchListener((v, event) -> onPlayerTouch(event));
-        findViewById(R.id.player_close).setOnClickListener(v -> finish());
-        nextCard = findViewById(R.id.player_next);
-        unlockBtn = findViewById(R.id.player_unlock);
-        findViewById(R.id.player_tracks).setOnClickListener(v -> { showTracks(); resetHideTimer(); });
-        findViewById(R.id.player_lock).setOnClickListener(v -> {
-            locked = true;
-            setControlsVisible(false);
-            Toast.makeText(this, "صفحه قفل شد", Toast.LENGTH_SHORT).show();
-        });
-        unlockBtn.setOnClickListener(v -> {
-            locked = false;
-            handler.removeCallbacks(hideUnlockRunnable);
-            unlockBtn.setVisibility(View.GONE);
-            setControlsVisible(true);
-            resetHideTimer();
-        });
-        findViewById(R.id.player_next_now).setOnClickListener(v -> playNextNow());
-        findViewById(R.id.player_next_cancel).setOnClickListener(v -> cancelNext(true));
-        findViewById(R.id.player_root).post(() -> pressFx(findViewById(R.id.player_root)));
-        playPauseButton.setOnClickListener(v -> {
-            togglePlayPause();
-            resetHideTimer();
-        });
-        findViewById(R.id.player_back10).setOnClickListener(v -> seekBy(-10000));
-        findViewById(R.id.player_forward10).setOnClickListener(v -> seekBy(10000));
-        ccButton.setOnClickListener(v -> toggleSubtitles());
-        ccButton.setOnLongClickListener(v -> { showSubStyle(); return true; });
-        findViewById(R.id.player_aspect).setOnClickListener(v -> cycleAspect());
-        final Button speedBtn = findViewById(R.id.player_speed);
-        final float[] rates = {1f, 1.25f, 1.5f, 2f, 0.5f, 0.75f};
-        final int[] ri = {0};
+        loadingSpinner = new ProgressBar(this);
+        FrameLayout.LayoutParams spinLp = new FrameLayout.LayoutParams(
+                dp(48), dp(48), Gravity.CENTER
+        );
+        root.addView(loadingSpinner, spinLp);
+
+        errorText = new TextView(this);
+        errorText.setTextColor(Color.parseColor("#FFD60A"));
+        errorText.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
+        errorText.setGravity(Gravity.CENTER);
+        errorText.setPadding(dp(24), dp(24), dp(24), dp(24));
+        errorText.setVisibility(View.GONE);
+        root.addView(errorText, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                Gravity.CENTER
+        ));
+
+        controlsOverlay = new LinearLayout(this);
+        controlsOverlay.setOrientation(LinearLayout.VERTICAL);
+        controlsOverlay.setLayoutDirection(View.LAYOUT_DIRECTION_LTR);
+
+        // Top Bar
+        LinearLayout topBar = new LinearLayout(this);
+        topBar.setOrientation(LinearLayout.HORIZONTAL);
+        topBar.setGravity(Gravity.CENTER_VERTICAL);
+        topBar.setBackgroundColor(Color.parseColor("#B3100E0C"));
+        topBar.setPadding(dp(12), dp(10), dp(12), dp(10));
+
+        Button backBtn = makeChipButton("بازگشت", "#EE3B17", Color.WHITE);
+        backBtn.setOnClickListener(v -> finish());
+        topBar.addView(backBtn);
+
+        titleText = new TextView(this);
+        titleText.setText(videoTitle);
+        titleText.setTextColor(Color.parseColor("#F6EFDC"));
+        titleText.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
+        titleText.setTypeface(null, Typeface.BOLD);
+        titleText.setPadding(dp(14), 0, dp(14), 0);
+        titleText.setSingleLine(true);
+        LinearLayout.LayoutParams titleLp = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+        topBar.addView(titleText, titleLp);
+
+        speedBtn = makeChipButton("1.0x", "#26221C", Color.parseColor("#F6EFDC"));
         speedBtn.setOnClickListener(v -> {
-            ri[0] = (ri[0] + 1) % rates.length;
-            try { if (vlcPlayer != null) vlcPlayer.setRate(rates[ri[0]]); } catch (Throwable ignored) { }
-            float r = rates[ri[0]];
-            speedBtn.setText((r == (int) r ? String.valueOf((int) r) : String.valueOf(r)) + "x");
-            resetHideTimer();
+            speedIdx = (speedIdx + 1) % speeds.length;
+            float s = speeds[speedIdx];
+            if (player != null) player.setPlaybackSpeed(s);
+            speedBtn.setText(String.format(Locale.US, "%.2gx", s));
+            scheduleAutoHide();
         });
-        findViewById(R.id.player_retry).setOnClickListener(v -> retryPlayback());
+        topBar.addView(speedBtn);
 
+        controlsOverlay.addView(topBar, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+        ));
+
+        // Center spacer
+        View spacer = new View(this);
+        controlsOverlay.addView(spacer, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f
+        ));
+
+        // Bottom Bar
+        LinearLayout bottomBar = new LinearLayout(this);
+        bottomBar.setOrientation(LinearLayout.VERTICAL);
+        bottomBar.setBackgroundColor(Color.parseColor("#CC100E0C"));
+        bottomBar.setPadding(dp(14), dp(8), dp(14), dp(12));
+
+        seekBar = new SeekBar(this);
+        seekBar.setMax(1000);
         seekBar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
             @Override
-            public void onProgressChanged(SeekBar sb, int progress, boolean fromUser) {
-                if (fromUser) {
-                    long dur = getDuration();
-                    if (dur > 0) {
-                        long pos = progress * dur / 1000;
-                        timeView.setText(formatTime(pos));
-                        timeTotalView.setText(formatTime(dur));
-                    }
+            public void onProgressChanged(SeekBar bar, int progress, boolean fromUser) {
+                if (fromUser && player != null && player.getDuration() > 0) {
+                    long target = (player.getDuration() * progress) / 1000L;
+                    timeText.setText(formatMs(target) + " / " + formatMs(player.getDuration()));
                 }
             }
 
             @Override
-            public void onStartTrackingTouch(SeekBar sb) {
-                seeking = true;
-                handler.removeCallbacks(hideControlsRunnable);
+            public void onStartTrackingTouch(SeekBar bar) {
+                isSeeking = true;
+                handler.removeCallbacks(hideRunnable);
             }
 
             @Override
-            public void onStopTrackingTouch(SeekBar sb) {
-                seeking = false;
-                long dur = getDuration();
-                if (dur > 0) seekTo(sb.getProgress() * dur / 1000);
-                resetHideTimer();
+            public void onStopTrackingTouch(SeekBar bar) {
+                isSeeking = false;
+                if (player != null && player.getDuration() > 0) {
+                    long target = (player.getDuration() * bar.getProgress()) / 1000L;
+                    player.seekTo(target);
+                }
+                scheduleAutoHide();
+            }
+        });
+        bottomBar.addView(seekBar, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+        ));
+
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(0, dp(6), 0, 0);
+
+        Button rewBtn = makeChipButton("-10s", "#26221C", Color.parseColor("#F6EFDC"));
+        rewBtn.setOnClickListener(v -> seekRelative(-10000));
+        row.addView(rewBtn);
+
+        playPauseBtn = makeChipButton("توقف", "#EE3B17", Color.WHITE);
+        LinearLayout.LayoutParams ppLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT
+        );
+        ppLp.setMargins(dp(8), 0, dp(8), 0);
+        playPauseBtn.setLayoutParams(ppLp);
+        playPauseBtn.setOnClickListener(v -> {
+            if (player == null) return;
+            if (player.isPlaying()) player.pause();
+            else player.play();
+            updatePlayButton();
+            scheduleAutoHide();
+        });
+        row.addView(playPauseBtn);
+
+        Button fwdBtn = makeChipButton("+10s", "#26221C", Color.parseColor("#F6EFDC"));
+        fwdBtn.setOnClickListener(v -> seekRelative(10000));
+        row.addView(fwdBtn);
+
+        timeText = new TextView(this);
+        timeText.setText("00:00 / 00:00");
+        timeText.setTextColor(Color.parseColor("#F6EFDC"));
+        timeText.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        timeText.setGravity(Gravity.END);
+        row.addView(timeText, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+
+        bottomBar.addView(row);
+        controlsOverlay.addView(bottomBar);
+
+        root.addView(controlsOverlay, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+        ));
+
+        root.setOnClickListener(v -> {
+            setControlsVisible(!controlsVisible);
+            if (controlsVisible) scheduleAutoHide();
+        });
+
+        setContentView(root);
+    }
+
+    private Button makeChipButton(String label, String bgHex, int fgColor) {
+        Button b = new Button(this);
+        b.setText(label);
+        b.setAllCaps(false);
+        b.setTextColor(fgColor);
+        b.setBackgroundColor(Color.parseColor(bgHex));
+        b.setPadding(dp(14), dp(6), dp(14), dp(6));
+        b.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        return b;
+    }
+
+    private void initPlayer() {
+        if (streamUrl.isEmpty()) {
+            loadingSpinner.setVisibility(View.GONE);
+            errorText.setText("آدرس ویدئو معتبر نیست.");
+            errorText.setVisibility(View.VISIBLE);
+            return;
+        }
+
+        DefaultHttpDataSource.Factory httpFactory = new DefaultHttpDataSource.Factory()
+                .setAllowCrossProtocolRedirects(true)
+                .setConnectTimeoutMs(15000)
+                .setReadTimeoutMs(15000)
+                .setUserAgent("TOOSH-MOVIE/2.4 Android");
+        DefaultDataSource.Factory dataSourceFactory = new DefaultDataSource.Factory(this, httpFactory);
+
+        player = new ExoPlayer.Builder(this)
+                .setMediaSourceFactory(new DefaultMediaSourceFactory(dataSourceFactory))
+                .build();
+        player.setVideoSurfaceView(surfaceView);
+        player.addListener(new Player.Listener() {
+            @Override
+            public void onPlaybackStateChanged(int state) {
+                loadingSpinner.setVisibility(state == Player.STATE_BUFFERING ? View.VISIBLE : View.GONE);
+                if (state == Player.STATE_ENDED) {
+                    setControlsVisible(true);
+                }
+                updatePlayButton();
+            }
+
+            @Override
+            public void onIsPlayingChanged(boolean isPlaying) {
+                updatePlayButton();
+            }
+
+            @Override
+            public void onPlayerError(PlaybackException error) {
+                loadingSpinner.setVisibility(View.GONE);
+                errorText.setText("خطا در پخش ویدئو: " + error.getMessage());
+                errorText.setVisibility(View.VISIBLE);
             }
         });
 
-        showLoading();
-        startVlc(originalUrl);
+        MediaItem item = MediaItem.fromUri(streamUrl);
+        player.setMediaItem(item);
+
+        String pKey = Progress.makeKey(streamUrl, metaJson);
+        long savedPos = Progress.getSavedPosition(this, pKey);
+        if (savedPos > 3000) {
+            player.seekTo(savedPos);
+        }
+
+        player.prepare();
+        player.setPlayWhenReady(true);
+
+        handler.post(tickRunnable);
+        scheduleAutoHide();
     }
 
-    // ---------- Loading animation ----------
-
-    private void showLoading() {
-        try {
-            if (loadingBox != null) loadingBox.setVisibility(View.VISIBLE);
-            loadingDots = 0;
-            handler.removeCallbacks(loadingDotsRunnable);
-            handler.post(loadingDotsRunnable);
-        } catch (Throwable ignored) {
+    private void seekRelative(long deltaMs) {
+        if (player == null) return;
+        long next = Math.max(0, player.getCurrentPosition() + deltaMs);
+        if (player.getDuration() > 0) {
+            next = Math.min(player.getDuration(), next);
         }
-    }
-
-    private void hideLoading() {
-        try {
-            handler.removeCallbacks(loadingDotsRunnable);
-            if (loadingBox != null) loadingBox.setVisibility(View.GONE);
-        } catch (Throwable ignored) {
-        }
-    }
-
-    // ---------- libVLC ----------
-
-    private void startVlc(String url) {
-        releaseExo();
-        useVlc = true;
-        showLoading();
-        try {
-            ArrayList<String> options = new ArrayList<>();
-            options.add("--no-video-title-show");
-            options.add("--network-caching=3000");
-            options.add("--no-stats");
-            if (userAgent != null && !userAgent.isEmpty()) {
-                options.add("--http-user-agent=" + userAgent);
-            }
-            ArrayList<String> styled = new ArrayList<>(options);
-            styled.add("--http-reconnect");
-            styled.add("--freetype-color=" + (SUB_COLORS[subColorIdx()] & 0xFFFFFF));
-            styled.add("--freetype-rel-fontsize=" + SUB_REL[subSizeIdx()]);
-            if (subBold()) styled.add("--freetype-bold");
-            int bgArgb = SUB_BG_ARGB[subBgIdx()];
-            if ((bgArgb >>> 24) > 0) {
-                styled.add("--freetype-background-opacity=" + (bgArgb >>> 24));
-                styled.add("--freetype-background-color=" + (bgArgb & 0xFFFFFF));
-            }
-            try {
-                vlcLib = new LibVLC(this, styled);
-            } catch (Throwable styleFail) {
-                // An option this libVLC build does not know must never cost us the player.
-                vlcLib = new LibVLC(this, options);
-            }
-            vlcPlayer = new MediaPlayer(vlcLib);
-            vlcPlayer.getVLCVout().setVideoView(surfaceView);
-            try {
-                vlcPlayer.getVLCVout().setSubtitlesView(subtitleSurface);
-            } catch (Throwable ignored) {
-            }
-            vlcPlayer.getVLCVout().attachViews(
-                    (vout, width, height, visibleWidth, visibleHeight, sarNum, sarDen) ->
-                            runOnUiThread(() -> onNewVideoLayout(
-                                    visibleWidth, visibleHeight, sarNum, sarDen)));
-            vlcPlayer.setEventListener(event -> runOnUiThread(() -> onVlcEvent(event)));
-            Media media = null;
-            if (url != null && url.startsWith("content://")) {
-                try {
-                    contentFd = getContentResolver().openAssetFileDescriptor(Uri.parse(url), "r");
-                    if (contentFd != null) {
-                        media = new Media(vlcLib, contentFd.getFileDescriptor());
-                    }
-                } catch (Throwable ignored) {
-                    media = null;
-                }
-            }
-            if (media == null) {
-                media = new Media(vlcLib, Uri.parse(url));
-            }
-            vlcPlayer.setMedia(media);
-            media.release();
-            vlcPlayer.play();
-            subtitleView.setVisibility(View.GONE);
-        } catch (Throwable t) {
-            // libVLC unavailable on this device/ABI: fall back.
-            startExo(originalUrl);
-        }
-    }
-
-    private void onVlcEvent(MediaPlayer.Event event) {
-        if (event == null) return;
-        switch (event.type) {
-            case MediaPlayer.Event.Opening:
-                showLoading();
-                break;
-            case MediaPlayer.Event.Buffering:
-                if (event.getBuffering() < 100f) showLoading();
-                else hideLoading();
-                break;
-            case MediaPlayer.Event.Playing:
-                hideLoading();
-                hideError();
-                handler.removeCallbacks(progressRunnable);
-                handler.post(progressRunnable);
-                resetHideTimer();
-                if (subtitlesOn) selectVlcSubtitles();
-                break;
-            case MediaPlayer.Event.EndReached:
-                hideLoading();
-                updatePlayButton();
-                onEnded();
-                break;
-            case MediaPlayer.Event.Paused:
-            case MediaPlayer.Event.Stopped:
-                hideLoading();
-                updatePlayButton();
-                break;
-            case MediaPlayer.Event.LengthChanged:
-                updateProgress();
-                break;
-            case MediaPlayer.Event.EncounteredError:
-                onVlcError();
-                break;
-            default:
-                break;
-        }
-        updatePlayButton();
-    }
-
-    private void onVlcError() {
-        if (!triedHttpVlc && originalUrl.startsWith("https://")) {
-            triedHttpVlc = true;
-            releaseVlc();
-            startVlc(originalUrl.replaceFirst("^https://", "http://"));
-            return;
-        }
-        // libVLC cannot play this stream: try ExoPlayer next.
-        if (!exoStarted) {
-            releaseVlc();
-            startExo(originalUrl);
-            return;
-        }
-        showError("پخش با VLC ناموفق بود. علت: خطای منبع (Source error)");
-    }
-
-    private void selectVlcSubtitles() {
-        if (vlcPlayer == null) return;
-        try {
-            if (vlcPlayer.getSpuTrack() != -1) return;
-            MediaPlayer.TrackDescription[] tracks = vlcPlayer.getSpuTracks();
-            if (tracks == null) return;
-            int chosen = -1;
-            for (MediaPlayer.TrackDescription t : tracks) {
-                if (t == null || t.id == -1) continue;
-                if (chosen == -1) chosen = t.id;
-                String n = t.name == null ? "" : t.name.toLowerCase();
-                if (n.contains("fa") || n.contains("per") || n.contains("fas")
-                        || n.contains("persian") || n.contains("فارسی")) {
-                    chosen = t.id;
-                    break;
-                }
-            }
-            if (chosen != -1) vlcPlayer.setSpuTrack(chosen);
-        } catch (Throwable ignored) {
-        }
-    }
-
-    private void releaseVlc() {
-        try {
-            if (contentFd != null) contentFd.close();
-        } catch (Throwable ignored) {
-        }
-        contentFd = null;
-        try {
-            if (vlcPlayer != null) {
-                vlcPlayer.stop();
-                vlcPlayer.getVLCVout().detachViews();
-                vlcPlayer.release();
-            }
-        } catch (Throwable ignored) {
-        }
-        vlcPlayer = null;
-        try {
-            if (vlcLib != null) vlcLib.release();
-        } catch (Throwable ignored) {
-        }
-        vlcLib = null;
-        useVlc = false;
-    }
-
-    // ---------- ExoPlayer fallback ----------
-
-    private void startExo(String url) {
-        exoStarted = true;
-        useVlc = false;
-        showLoading();
-        subtitleView.setVisibility(View.GONE);
-        try {
-            trackSelector = new DefaultTrackSelector(this);
-            try {
-                DefaultTrackSelector.Parameters params =
-                        new DefaultTrackSelector.Parameters.Builder()
-                                .setPreferredTextLanguage("fa")
-                                .setSelectUndeterminedTextLanguage(true)
-                                .build();
-                trackSelector.setParameters(params);
-            } catch (Throwable ignored) {
-            }
-            // v1.37: a downloaded film is content://, and the HTTP
-            // data source cannot open it (MalformedURLException:
-            // unknown protocol: content, code 2001). Use the default
-            // data source for content://, which reads via the
-            // ContentResolver; keep the HTTP factory (with the
-            // browser UA) for http/https streams.
-            androidx.media3.datasource.DataSource.Factory dataFactory;
-            if (url != null && url.startsWith("content://")) {
-                dataFactory = new androidx.media3.datasource.DefaultDataSource.Factory(this);
-            } else {
-                DefaultHttpDataSource.Factory httpFactory = new DefaultHttpDataSource.Factory()
-                        .setAllowCrossProtocolRedirects(true)
-                        .setConnectTimeoutMs(15000)
-                        .setReadTimeoutMs(15000);
-                if (userAgent != null && !userAgent.isEmpty()) {
-                    httpFactory.setUserAgent(userAgent);
-                }
-                dataFactory = httpFactory;
-            }
-            exoPlayer = new ExoPlayer.Builder(this)
-                    .setTrackSelector(trackSelector)
-                    .setMediaSourceFactory(new DefaultMediaSourceFactory(dataFactory))
-                    .build();
-            exoPlayer.setVideoSurfaceView(surfaceView);
-            exoPlayer.addListener(new Player.Listener() {
-                @Override
-                public void onCues(CueGroup cueGroup) {
-                    if (cueGroup != null) showCues(cueGroup.cues);
-                }
-
-                @Override
-                public void onCues(List<Cue> cues) {
-                    showCues(cues);
-                }
-
-                @Override
-                public void onPlaybackStateChanged(int state) {
-                    updatePlayButton();
-                    if (state == Player.STATE_BUFFERING) {
-                        showLoading();
-                    } else if (state == Player.STATE_READY) {
-                        hideLoading();
-                        hideError();
-                        handler.post(progressRunnable);
-                        resetHideTimer();
-                    } else if (state == Player.STATE_IDLE || state == Player.STATE_ENDED) {
-                        hideLoading();
-                    }
-                }
-
-                @Override
-                public void onIsPlayingChanged(boolean isPlaying) {
-                    updatePlayButton();
-                    if (isPlaying) resetHideTimer();
-                }
-
-                @Override
-                public void onVideoSizeChanged(
-                        androidx.media3.common.VideoSize videoSize) {
-                    lastVideoW = videoSize.width;
-                    lastVideoH = videoSize.height;
-                    lastSarNum = 0;
-                    lastSarDen = 0;
-                    applyVideoLayout();
-                }
-
-                @Override
-                public void onTracksChanged(Tracks tracks) {
-                    if (subtitlesOn) selectExoSubtitles(tracks);
-                }
-
-                @Override
-                public void onPlayerError(PlaybackException error) {
-                    onExoError(error);
-                }
-            });
-            exoPlayer.setMediaItem(MediaItem.fromUri(url));
-            exoPlayer.prepare();
-            exoPlayer.play();
-        } catch (Throwable t) {
-            showError("پلیر راه‌اندازی نشد: " + t.getClass().getSimpleName()
-                    + " - " + t.getMessage());
-        }
-    }
-
-    private void onExoError(PlaybackException error) {
-        if (!triedHttpExo && originalUrl.startsWith("https://")) {
-            triedHttpExo = true;
-            releaseExo();
-            startExo(originalUrl.replaceFirst("^https://", "http://"));
-            return;
-        }
-        StringBuilder detail = new StringBuilder("خطا در پخش: ");
-        detail.append(error.getMessage() == null ? "Source error" : error.getMessage());
-        detail.append(" (کد ").append(error.errorCode).append(")");
-        Throwable cause = error.getCause();
-        int depth = 0;
-        while (cause != null && depth < 3) {
-            detail.append(" / ").append(cause.getClass().getSimpleName());
-            if (cause.getMessage() != null) detail.append(": ").append(cause.getMessage());
-            cause = cause.getCause();
-            depth++;
-        }
-        showError(detail.toString());
-    }
-
-    private void selectExoSubtitles(Tracks tracks) {
-        if (trackSelector == null) return;
-        try {
-            TrackGroup chosenGroup = null;
-            int chosenIndex = 0;
-            boolean alreadySelected = false;
-            for (Tracks.Group group : tracks.getGroups()) {
-                if (group.getType() != C.TRACK_TYPE_TEXT) continue;
-                if (group.isSelected()) {
-                    alreadySelected = true;
-                    break;
-                }
-                TrackGroup mediaGroup = group.getMediaTrackGroup();
-                if (chosenGroup == null) {
-                    chosenGroup = mediaGroup;
-                    chosenIndex = 0;
-                }
-                for (int i = 0; i < mediaGroup.length; i++) {
-                    String lang = mediaGroup.getFormat(i).language;
-                    if (lang != null && (lang.equals("fa") || lang.equals("fas")
-                            || lang.equals("per") || lang.equals("persian"))) {
-                        chosenGroup = mediaGroup;
-                        chosenIndex = i;
-                        break;
-                    }
-                }
-            }
-            if (alreadySelected || chosenGroup == null) return;
-            DefaultTrackSelector.Parameters.Builder b =
-                    trackSelector.getParameters().buildUpon();
-            b.clearOverridesOfType(C.TRACK_TYPE_TEXT);
-            b.setOverrideForType(new TrackSelectionOverride(chosenGroup, chosenIndex));
-            trackSelector.setParameters(b.build());
-        } catch (Throwable ignored) {
-        }
-    }
-
-    private void releaseExo() {
-        try {
-            if (exoPlayer != null) exoPlayer.release();
-        } catch (Throwable ignored) {
-        }
-        exoPlayer = null;
-        trackSelector = null;
-    }
-
-    private void showCues(List<Cue> cues) {
-        if (useVlc || !subtitlesOn || cues == null || cues.isEmpty()) {
-            subtitleView.setVisibility(View.GONE);
-            return;
-        }
-        StringBuilder sb = new StringBuilder();
-        for (Cue cue : cues) {
-            if (cue.text == null) continue;
-            String text = cue.text.toString().replaceAll("\\{[^}]*\\}", "").trim();
-            if (text.isEmpty()) continue;
-            if (sb.length() > 0) sb.append("\n");
-            sb.append(text);
-        }
-        if (sb.length() == 0) {
-            subtitleView.setVisibility(View.GONE);
-        } else {
-            subtitleView.setText(sb.toString());
-            subtitleView.setVisibility(View.VISIBLE);
-            applySubTransform();
-        }
-    }
-
-    // ---------- Shared controls ----------
-
-    private void retryPlayback() {
-        hideError();
-        if (useVlc || vlcPlayer != null) {
-            // Retry the other engine / http variant next.
-            if (!exoStarted) {
-                releaseVlc();
-                startExo(originalUrl);
-            } else {
-                releaseVlc();
-                releaseExo();
-                exoStarted = false;
-                triedHttpVlc = false;
-                triedHttpExo = false;
-                startVlc(originalUrl);
-            }
-        } else {
-            releaseExo();
-            exoStarted = false;
-            triedHttpExo = false;
-            startExo(originalUrl);
-        }
-    }
-
-    private void togglePlayPause() {
-        if (useVlc && vlcPlayer != null) {
-            if (vlcPlayer.isPlaying()) vlcPlayer.pause();
-            else vlcPlayer.play();
-        } else if (exoPlayer != null) {
-            if (exoPlayer.isPlaying()) exoPlayer.pause();
-            else exoPlayer.play();
-        }
-        updatePlayButton();
-    }
-
-    private void seekBy(long deltaMs) {
-        long pos = getCurrentPosition();
-        long dur = getDuration();
-        long next = pos + deltaMs;
-        if (next < 0) next = 0;
-        if (dur > 0 && next > dur) next = dur;
-        seekTo(next);
-    }
-
-    private void seekTo(long pos) {
-        if (useVlc && vlcPlayer != null) vlcPlayer.setTime(pos);
-        else if (exoPlayer != null) exoPlayer.seekTo(pos);
-        updateProgress();
-    }
-
-    private long getCurrentPosition() {
-        if (useVlc && vlcPlayer != null) return vlcPlayer.getTime();
-        if (exoPlayer != null) return exoPlayer.getCurrentPosition();
-        return 0;
-    }
-
-    private long getDuration() {
-        if (useVlc && vlcPlayer != null) {
-            long len = vlcPlayer.getLength();
-            return len > 0 ? len : 0;
-        }
-        if (exoPlayer != null) {
-            long dur = exoPlayer.getDuration();
-            return dur > 0 ? dur : 0;
-        }
-        return 0;
-    }
-
-    private boolean isPlaying() {
-        if (useVlc && vlcPlayer != null) return vlcPlayer.isPlaying();
-        if (exoPlayer != null) return exoPlayer.isPlaying();
-        return false;
-    }
-
-    private void toggleSubtitles() {
-        subtitlesOn = !subtitlesOn;
-        ccButton.setBackgroundResource(subtitlesOn
-                ? R.drawable.player_btn_cc_on : R.drawable.player_btn_cc_off);
-        if (useVlc && vlcPlayer != null) {
-            try {
-                if (!subtitlesOn) vlcPlayer.setSpuTrack(-1);
-                else selectVlcSubtitles();
-            } catch (Throwable ignored) {
-            }
-        } else if (exoPlayer != null && trackSelector != null) {
-            try {
-                DefaultTrackSelector.Parameters.Builder b =
-                        trackSelector.getParameters().buildUpon();
-                if (!subtitlesOn) {
-                    b.setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true);
-                } else {
-                    b.setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false);
-                    b.clearOverridesOfType(C.TRACK_TYPE_TEXT);
-                }
-                trackSelector.setParameters(b.build());
-                if (subtitlesOn) selectExoSubtitles(exoPlayer.getCurrentTracks());
-            } catch (Throwable ignored) {
-            }
-        }
-        if (!subtitlesOn) subtitleView.setVisibility(View.GONE);
-        resetHideTimer();
+        player.seekTo(next);
+        updatePlaybackUi();
+        scheduleAutoHide();
     }
 
     private void updatePlayButton() {
-        playPauseButton.setImageResource(isPlaying()
-                ? R.drawable.ic_pause : R.drawable.ic_play);
+        if (playPauseBtn == null || player == null) return;
+        playPauseBtn.setText(player.isPlaying() ? "توقف" : "پخش");
     }
 
-    private void updateProgress() {
-        long pos = getCurrentPosition();
-        long dur = getDuration();
-        if (controlsVisible || seeking) {
-            timeView.setText(formatTime(pos));
-            timeTotalView.setText(formatTime(dur));
-            if (!seeking && dur > 0) {
-                seekBar.setProgress((int) (pos * 1000 / dur));
+    private void updatePlaybackUi() {
+        if (player == null || isSeeking) return;
+        long dur = player.getDuration();
+        long pos = player.getCurrentPosition();
+        if (dur > 0) {
+            seekBar.setProgress((int) ((pos * 1000L) / dur));
+            timeText.setText(formatMs(pos) + " / " + formatMs(dur));
+            if (pos > 2000) {
+                Progress.save(this, streamUrl, videoTitle, metaJson, pos, dur);
             }
-            updatePlayButton();
         }
-        tickProgress(dur);
-    }
-
-    // ---------- continue watching / next episode ----------
-
-    private void tickProgress(long dur) {
-        try {
-            if (!resumeDone && dur > 0 && isPlaying()) {
-                resumeDone = true;
-                if (resumeMs > 10000 && resumeMs < dur - 30000) {
-                    seekTo(resumeMs);
-                    Toast.makeText(this, "ادامه از " + formatTime(resumeMs), Toast.LENGTH_SHORT).show();
-                }
-            }
-            if (resumeDone && isPlaying() && ++saveTick % 10 == 0) saveProgressNow();
-        } catch (Throwable ignored) { }
-    }
-
-    private void saveProgressNow() {
-        if (!resumeDone) return;
-        Progress.save(this, progKey, originalUrl, currentTitle,
-                getCurrentPosition(), getDuration(), metaJson);
-    }
-
-    private void onEnded() {
-        Progress.remove(this, progKey);
-        if (queue != null && queue.length() > 0 && nextCard != null
-                && nextCard.getVisibility() != View.VISIBLE) {
-            org.json.JSONObject n = queue.optJSONObject(0);
-            if (n == null) return;
-            ((TextView) findViewById(R.id.player_next_title)).setText(n.optString("title", ""));
-            nextCount = 6;
-            ((TextView) findViewById(R.id.player_next_now)).setText("همین الان (" + nextCount + ")");
-            nextCard.setAlpha(0f);
-            nextCard.setVisibility(View.VISIBLE);
-            nextCard.animate().alpha(1f).setDuration(220).start();
-            handler.removeCallbacks(nextTickRunnable);
-            handler.postDelayed(nextTickRunnable, 1000);
-        }
-    }
-
-    private void cancelNext(boolean clearQueue) {
-        handler.removeCallbacks(nextTickRunnable);
-        if (nextCard != null) nextCard.setVisibility(View.GONE);
-        if (clearQueue) queue = null;
-    }
-
-    private void playNextNow() {
-        try {
-            if (queue == null || queue.length() == 0) { cancelNext(true); return; }
-            org.json.JSONObject n = queue.optJSONObject(0);
-            org.json.JSONArray rest = new org.json.JSONArray();
-            for (int i = 1; i < queue.length(); i++) rest.put(queue.get(i));
-            cancelNext(false);
-            queue = rest;
-            String url = n.optString("url", "");
-            if (url.isEmpty()) return;
-            org.json.JSONObject m = n.optJSONObject("meta");
-            if (m == null) m = new org.json.JSONObject();
-            m.put("queue", rest);
-            m.put("key", n.optString("key", Progress.keyFor(url)));
-            metaJson = m.toString();
-            progKey = m.optString("key");
-            originalUrl = url;
-            currentTitle = n.optString("title", "");
-            titleView.setText(currentTitle);
-            resumeMs = Progress.get(this, progKey);
-            resumeDone = false;
-            saveTick = 0;
-            triedHttpVlc = false;
-            exoStarted = false;
-            releaseVlc();
-            releaseExo();
-            showLoading();
-            startVlc(originalUrl);
-        } catch (Throwable ignored) { }
-    }
-
-    // ---------- audio / subtitle tracks ----------
-
-    private TextView trackRow(String text, boolean on, Runnable click) {
-        TextView tv = new TextView(this);
-        tv.setText(text);
-        tv.setGravity(android.view.Gravity.CENTER);
-        tv.setTextColor(on ? 0xFFFFFFFF : 0xFFF6EFDC);
-        tv.setTextSize(14);
-        tv.setTypeface(null, android.graphics.Typeface.BOLD);
-        tv.setPadding(dpToPx(14), dpToPx(10), dpToPx(14), dpToPx(12));
-        tv.setBackgroundResource(on ? R.drawable.player_btn_play : R.drawable.player_btn_circle);
-        tv.setClickable(true);
-        android.widget.LinearLayout.LayoutParams lp = new android.widget.LinearLayout.LayoutParams(
-                android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
-                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT);
-        lp.setMargins(0, dpToPx(4), dpToPx(4), dpToPx(8));
-        tv.setLayoutParams(lp);
-        tv.setOnClickListener(v -> click.run());
-        return tv;
-    }
-
-    private TextView trackHead(String text) {
-        TextView tv = new TextView(this);
-        tv.setText(text);
-        tv.setTextColor(0xFFFFD60A);
-        tv.setTextSize(13);
-        tv.setTypeface(null, android.graphics.Typeface.BOLD);
-        tv.setPadding(0, dpToPx(8), 0, dpToPx(2));
-        return tv;
-    }
-
-    private void showTracks() {
-        if (!(useVlc && vlcPlayer != null)) {
-            Toast.makeText(this, "انتخاب صدا و زیرنویس فقط با پلیر VLC فعال است", Toast.LENGTH_SHORT).show();
-            return;
-        }
-        final android.app.Dialog d = new android.app.Dialog(this, android.R.style.Theme_Translucent_NoTitleBar);
-        final android.widget.LinearLayout box = new android.widget.LinearLayout(this);
-        box.setOrientation(android.widget.LinearLayout.VERTICAL);
-        box.setPadding(dpToPx(16), dpToPx(12), dpToPx(12), dpToPx(12));
-        box.setBackgroundResource(R.drawable.player_card);
-        try {
-            MediaPlayer.TrackDescription[] au = vlcPlayer.getAudioTracks();
-            int curA = vlcPlayer.getAudioTrack();
-            if (au != null && au.length > 0) {
-                box.addView(trackHead("صدا"));
-                for (MediaPlayer.TrackDescription t : au) {
-                    final int id = t.id;
-                    if (id < 0) continue;
-                    box.addView(trackRow(t.name, id == curA, () -> { vlcPlayer.setAudioTrack(id); d.dismiss(); }));
-                }
-            }
-            MediaPlayer.TrackDescription[] sp = vlcPlayer.getSpuTracks();
-            int curS = vlcPlayer.getSpuTrack();
-            if (sp != null && sp.length > 0) {
-                box.addView(trackHead("زیرنویس"));
-                for (MediaPlayer.TrackDescription t : sp) {
-                    final int id = t.id;
-                    final boolean off = id < 0;
-                    box.addView(trackRow(off ? "خاموش" : t.name, id == curS, () -> {
-                        vlcPlayer.setSpuTrack(id);
-                        subtitlesOn = !off;
-                        ccButton.setBackgroundResource(subtitlesOn
-                                ? R.drawable.player_btn_cc_on : R.drawable.player_btn_cc_off);
-                        d.dismiss();
-                    }));
-                }
-            }
-        } catch (Throwable ignored) { }
-        box.addView(trackRow("ظاهر زیرنویس: رنگ، پس‌زمینه، اندازه…", false, () -> { d.dismiss(); showSubStyle(); }));
-        box.addView(trackHead("تایمر خواب"));
-        final int[] sl = {sleepIdx};
-        box.addView(chipGroup(new String[]{"خاموش", "۱۵ دقیقه", "۳۰ دقیقه", "۶۰ دقیقه"}, sl, 4, null, () -> setSleep(sl[0])));
-        box.addView(trackHead("هماهنگی زیرنویس"));
-        final android.widget.LinearLayout line = new android.widget.LinearLayout(this);
-        line.setOrientation(android.widget.LinearLayout.HORIZONTAL);
-        final TextView lab = new TextView(this);
-        lab.setTextColor(0xFFF6EFDC);
-        lab.setTextSize(14);
-        lab.setGravity(android.view.Gravity.CENTER);
-        lab.setTypeface(android.graphics.Typeface.MONOSPACE, android.graphics.Typeface.BOLD);
-        lab.setLayoutParams(new android.widget.LinearLayout.LayoutParams(0,
-                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
-        final long[] delay = {0};
-        try { delay[0] = vlcPlayer.getSpuDelay(); } catch (Throwable ignored) { }
-        final Runnable upd = () -> lab.setText(String.format(java.util.Locale.US, "%+.1f s", delay[0] / 1000000.0));
-        upd.run();
-        TextView minus = trackRow("-0.5", false, () -> {
-            delay[0] -= 500000; try { vlcPlayer.setSpuDelay(delay[0]); } catch (Throwable ignored) { } upd.run(); });
-        TextView plus = trackRow("+0.5", false, () -> {
-            delay[0] += 500000; try { vlcPlayer.setSpuDelay(delay[0]); } catch (Throwable ignored) { } upd.run(); });
-        minus.setLayoutParams(new android.widget.LinearLayout.LayoutParams(dpToPx(90),
-                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT));
-        plus.setLayoutParams(new android.widget.LinearLayout.LayoutParams(dpToPx(90),
-                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT));
-        line.addView(minus);
-        line.addView(lab);
-        line.addView(plus);
-        box.addView(line);
-        android.widget.ScrollView sv = new android.widget.ScrollView(this);
-        sv.addView(box);
-        d.setContentView(sv);
-        d.setCanceledOnTouchOutside(true);
-        try {
-            android.view.Window w = d.getWindow();
-            w.setBackgroundDrawable(new android.graphics.drawable.ColorDrawable(0x99000000));
-            int width = Math.min(getResources().getDisplayMetrics().widthPixels - dpToPx(32), dpToPx(420));
-            w.setLayout(width, android.view.ViewGroup.LayoutParams.WRAP_CONTENT);
-            w.setGravity(android.view.Gravity.CENTER);
-            w.setDimAmount(0.5f);
-        } catch (Throwable ignored) { }
-        d.show();
-    }
-
-    @Override
-    public void onBackPressed() {
-        if (locked) { showUnlock(); return; }
-        super.onBackPressed();
-    }
-
-    private void showUnlock() {
-        if (unlockBtn == null) return;
-        unlockBtn.setAlpha(0f);
-        unlockBtn.setVisibility(View.VISIBLE);
-        unlockBtn.animate().alpha(1f).setDuration(150).start();
-        handler.removeCallbacks(hideUnlockRunnable);
-        handler.postDelayed(hideUnlockRunnable, 2500);
-    }
-
-    /** Fade + slide, like the site's panels (no layout pass, only alpha/translation). */
-    private void animateBar(final View bar, boolean show, int offset) {
-        bar.animate().cancel();
-        if (show) {
-            if (bar.getVisibility() != View.VISIBLE) {
-                bar.setAlpha(0f);
-                bar.setTranslationY(offset);
-                bar.setVisibility(View.VISIBLE);
-            }
-            bar.animate().alpha(1f).translationY(0f).setDuration(220)
-                    .setInterpolator(new android.view.animation.DecelerateInterpolator()).start();
-        } else {
-            bar.animate().alpha(0f).translationY(offset).setDuration(180)
-                    .withEndAction(() -> { if (!controlsVisible) bar.setVisibility(View.GONE); }).start();
-        }
-    }
-
-    private void toggleControls() {
-        setControlsVisible(!controlsVisible);
     }
 
     private void setControlsVisible(boolean visible) {
-        if (locked && visible) return;
         controlsVisible = visible;
-        animateBar(topBar, visible, -dpToPx(24));
-        animateBar(controlsBar, visible, dpToPx(24));
-        int marginPx = dpToPx(visible ? 170 : 32);
-        if (subtitleView.getVisibility() == View.VISIBLE) {
-            FrameLayout.LayoutParams lp =
-                    (FrameLayout.LayoutParams) subtitleView.getLayoutParams();
-            lp.bottomMargin = marginPx;
-            subtitleView.setLayoutParams(lp);
+        controlsOverlay.setVisibility(visible ? View.VISIBLE : View.GONE);
+        if (!visible) hideSystemUi();
+    }
+
+    private void scheduleAutoHide() {
+        handler.removeCallbacks(hideRunnable);
+        handler.postDelayed(hideRunnable, 3500);
+    }
+
+    private void hideSystemUi() {
+        getWindow().getDecorView().setSystemUiVisibility(
+                View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                        | View.SYSTEM_UI_FLAG_FULLSCREEN
+                        | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                        | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                        | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+        );
+    }
+
+    private String formatMs(long ms) {
+        if (ms <= 0) return "00:00";
+        long totalSec = ms / 1000L;
+        long h = totalSec / 3600L;
+        long m = (totalSec % 3600L) / 60L;
+        long s = totalSec % 60L;
+        if (h > 0) return String.format(Locale.US, "%d:%02d:%02d", h, m, s);
+        return String.format(Locale.US, "%02d:%02d", m, s);
+    }
+
+    private int dp(int v) {
+        return Math.round(v * getResources().getDisplayMetrics().density);
+    }
+
+    @Override
+    public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        if (hasFocus && !controlsVisible) {
+            hideSystemUi();
         }
-        try {
-            FrameLayout.LayoutParams slp =
-                    (FrameLayout.LayoutParams) subtitleSurface.getLayoutParams();
-            slp.bottomMargin = marginPx;
-            subtitleSurface.setLayoutParams(slp);
-        } catch (Throwable ignored) {
-        }
-        if (visible) {
-            updateProgress();
-            resetHideTimer();
-        }
-    }
-
-    private int dpToPx(int dp) {
-        return Math.round(dp * getResources().getDisplayMetrics().density);
-    }
-
-    // Centre the video with its true aspect ratio. Without this,
-    // libVLC can leave the picture sitting low with a large black
-    // area below it after the portrait -> landscape rotation.
-    private void onNewVideoLayout(int visibleWidth, int visibleHeight,
-                                  int sarNum, int sarDen) {
-        lastVideoW = visibleWidth;
-        lastVideoH = visibleHeight;
-        lastSarNum = sarNum;
-        lastSarDen = sarDen;
-        applyVideoLayout();
-    }
-
-    // Apply the current aspect mode to the video surface. This is
-    // what was missing before: cycleAspect only changed the libVLC
-    // scale flag, while this listener kept resizing the surface
-    // back to BestFit, so the picture never actually changed.
-    private void applyVideoLayout() {
-        try {
-            DisplayMetrics dm = getResources().getDisplayMetrics();
-            int screenW = dm.widthPixels;
-            int screenH = dm.heightPixels;
-            int w, h;
-            if (aspectIndex == 1) {
-                // Fill: whole screen, libVLC stretches to the surface.
-                w = screenW;
-                h = screenH;
-            } else {
-                double targetAspect;
-                if (aspectIndex == 2) {
-                    targetAspect = 16.0 / 9.0;
-                } else if (aspectIndex == 3) {
-                    targetAspect = 4.0 / 3.0;
-                } else if (lastVideoW > 0 && lastVideoH > 0) {
-                    targetAspect = (double) lastVideoW / lastVideoH;
-                    if (lastSarNum > 0 && lastSarDen > 0) {
-                        targetAspect = targetAspect * lastSarNum / lastSarDen;
-                    }
-                } else {
-                    return;
-                }
-                double screenAspect = (double) screenW / screenH;
-                if (aspectIndex == 4) {
-                    // Fullscreen: cover the whole screen, no black
-                    // bars. Scale up until both dimensions cover the
-                    // screen, then centre-crop the overflow.
-                    if (targetAspect > screenAspect) {
-                        h = screenH;
-                        w = (int) (screenH * targetAspect);
-                    } else {
-                        w = screenW;
-                        h = (int) (screenW / targetAspect);
-                    }
-                } else if (targetAspect > screenAspect) {
-                    w = screenW;
-                    h = (int) (screenW / targetAspect);
-                } else {
-                    h = screenH;
-                    w = (int) (screenH * targetAspect);
-                }
-            }
-            // Pinch zoom: scale the fitted/cover size around the
-            // centre. The FrameLayout clips the overflow, so this
-            // crops rather than stretches. Zoom is kept when the
-            // video layout changes (e.g. rotation).
-            if (zoomScale > 1f) {
-                w = (int) (w * zoomScale);
-                h = (int) (h * zoomScale);
-            }
-            FrameLayout.LayoutParams lp =
-                    (FrameLayout.LayoutParams) surfaceView.getLayoutParams();
-            lp.width = w;
-            lp.height = h;
-            lp.gravity = android.view.Gravity.CENTER;
-            surfaceView.setLayoutParams(lp);
-        } catch (Throwable ignored) {
-        }
-    }
-
-    // True when the current size leaves no black bars: the surface
-    // covers the whole screen in both dimensions.
-    private boolean isCoveringScreen() {
-        try {
-            DisplayMetrics dm = getResources().getDisplayMetrics();
-            FrameLayout.LayoutParams lp =
-                    (FrameLayout.LayoutParams) surfaceView.getLayoutParams();
-            return lp.width >= dm.widthPixels && lp.height >= dm.heightPixels;
-        } catch (Throwable ignored) {
-            return false;
-        }
-    }
-
-    private void applyAspect() {
-        try {
-            if (useVlc && vlcPlayer != null) {
-                vlcPlayer.setVideoScale(vlcScaleFor(aspectIndex));
-            }
-        } catch (Throwable ignored) {
-        }
-        try {
-            if (!useVlc && exoPlayer != null) {
-                exoPlayer.setVideoScalingMode(aspectIndex == 1 || aspectIndex == 4
-                        ? C.VIDEO_SCALING_MODE_SCALE_TO_FIT_WITH_CROPPING
-                        : C.VIDEO_SCALING_MODE_SCALE_TO_FIT);
-            }
-        } catch (Throwable ignored) {
-        }
-        applyVideoLayout();
-    }
-
-    private void cycleAspect() {
-        aspectIndex = (aspectIndex + 1) % 5;
-        // A tapped aspect mode is exact: clear any manual pinch zoom.
-        zoomScale = 1f;
-        applyAspect();
-        String[] names = {"متناسب", "پر کردن صفحه", "۱۶:۹", "۴:۳", "فول‌اسکرین"};
-        showGesture(names[aspectIndex]);
-        resetHideTimer();
-    }
-
-    private float pinchDistance(MotionEvent event) {
-        if (event.getPointerCount() < 2) return 0f;
-        float dx = event.getX(0) - event.getX(1);
-        float dy = event.getY(0) - event.getY(1);
-        return (float) Math.sqrt(dx * dx + dy * dy);
-    }
-
-    private void showGesture(int iconRes, String text) {
-        gestureIcon.setImageResource(iconRes);
-        gestureText.setText(text);
-        gestureBox.setVisibility(View.VISIBLE);
-        handler.removeCallbacks(hideGestureRunnable);
-        handler.postDelayed(hideGestureRunnable, 1200);
-    }
-
-    private void showGesture(String text) {
-        showGesture(R.drawable.ic_fullscreen, text);
-    }
-
-    private void showGestureDrawable(Drawable icon, String text) {
-        gestureIcon.setImageDrawable(icon);
-        gestureText.setText(text);
-        gestureBox.setVisibility(View.VISIBLE);
-        handler.removeCallbacks(hideGestureRunnable);
-        handler.postDelayed(hideGestureRunnable, 1200);
-    }
-
-    // Sun drawn in code, not a static icon: first the whole sun in
-    // grey, then the same sun in yellow clipped to the bottom
-    // portion that matches the brightness. At 50% exactly the
-    // bottom half is yellow and the top half stays grey; at low
-    // brightness only a small yellow sliver at the bottom shows.
-    private Drawable brightnessIcon(float brightness01) {
-        int s = 256;
-        Bitmap bmp = Bitmap.createBitmap(s, s, Bitmap.Config.ARGB_8888);
-        Canvas c = new Canvas(bmp);
-        Paint grey = new Paint(Paint.ANTI_ALIAS_FLAG);
-        grey.setColor(Color.parseColor("#80F6EFDC"));
-        grey.setStyle(Paint.Style.FILL);
-        grey.setStrokeWidth(14);
-        grey.setStrokeCap(Paint.Cap.ROUND);
-        Paint yellow = new Paint(Paint.ANTI_ALIAS_FLAG);
-        yellow.setColor(Color.parseColor("#FFD60A"));
-        yellow.setStyle(Paint.Style.FILL);
-        yellow.setStrokeWidth(14);
-        yellow.setStrokeCap(Paint.Cap.ROUND);
-        drawSun(c, grey);
-        if (brightness01 > 0) {
-            c.save();
-            float top = s * (1f - brightness01);
-            c.clipRect(0, top, s, s);
-            drawSun(c, yellow);
-            c.restore();
-        }
-        return new BitmapDrawable(getResources(), bmp);
-    }
-
-    private void drawSun(Canvas c, Paint p) {
-        float cx = 128, cy = 128;
-        // Rays first (stroke), then the disc (fill).
-        Paint stroke = new Paint(p);
-        stroke.setStyle(Paint.Style.STROKE);
-        for (int i = 0; i < 8; i++) {
-            double a = Math.toRadians(i * 45);
-            float x1 = (float) (cx + Math.cos(a) * 82);
-            float y1 = (float) (cy + Math.sin(a) * 82);
-            float x2 = (float) (cx + Math.cos(a) * 112);
-            float y2 = (float) (cy + Math.sin(a) * 112);
-            c.drawLine(x1, y1, x2, y2, stroke);
-        }
-        Paint fill = new Paint(p);
-        fill.setStyle(Paint.Style.FILL);
-        c.drawCircle(cx, cy, 58, fill);
-    }
-
-    // Speaker drawn in code: one, two or three parenthesis waves
-    // for low / half / high volume. At 0% there are no waves at
-    // all, just the speaker with a red slash across it.
-    private Drawable volumeIcon(int percent) {
-        int s = 256;
-        Bitmap bmp = Bitmap.createBitmap(s, s, Bitmap.Config.ARGB_8888);
-        Canvas c = new Canvas(bmp);
-        Paint white = new Paint(Paint.ANTI_ALIAS_FLAG);
-        white.setColor(Color.parseColor("#F6EFDC"));
-        white.setStyle(Paint.Style.FILL);
-        // Speaker body: small rectangle + triangle cone.
-        Path speaker = new Path();
-        speaker.moveTo(36, 104);
-        speaker.lineTo(88, 104);
-        speaker.lineTo(140, 62);
-        speaker.lineTo(140, 194);
-        speaker.lineTo(88, 152);
-        speaker.lineTo(36, 152);
-        speaker.close();
-        c.drawPath(speaker, white);
-        if (percent <= 0) {
-            Paint red = new Paint(Paint.ANTI_ALIAS_FLAG);
-            red.setColor(Color.parseColor("#EE3B17"));
-            red.setStyle(Paint.Style.STROKE);
-            red.setStrokeWidth(16);
-            red.setStrokeCap(Paint.Cap.ROUND);
-            c.drawLine(28, 28, 228, 228, red);
-            return new BitmapDrawable(getResources(), bmp);
-        }
-        int waves = percent <= 33 ? 1 : (percent <= 66 ? 2 : 3);
-        Paint wave = new Paint(Paint.ANTI_ALIAS_FLAG);
-        wave.setColor(Color.parseColor("#F6EFDC"));
-        wave.setStyle(Paint.Style.STROKE);
-        wave.setStrokeWidth(13);
-        wave.setStrokeCap(Paint.Cap.ROUND);
-        // Three parenthesis arcs, smallest first.
-        RectF[] arcs = {
-                new RectF(148, 88, 198, 168),
-                new RectF(168, 68, 228, 188),
-                new RectF(188, 48, 248, 208),
-        };
-        for (int i = 0; i < waves; i++) {
-            c.drawArc(arcs[i], -55, 110, false, wave);
-        }
-        return new BitmapDrawable(getResources(), bmp);
-    }
-
-    // VLC-style gestures on the video area. Buttons and the seek
-    // bar still receive their own touches; this listener is only
-    // on the root frame, and child views consume their touches
-    // first, so a tap on a button does not become a gesture.
-    private boolean onPlayerTouch(MotionEvent event) {
-        if (locked) {
-            if (event.getActionMasked() == MotionEvent.ACTION_UP) showUnlock();
-            return true;
-        }
-        if (subEdit) return onSubEditTouch(event);
-        switch (event.getActionMasked()) {
-            case MotionEvent.ACTION_POINTER_DOWN: {
-                handler.removeCallbacks(subLongPress);
-                // Second finger: start a pinch zoom and cancel any
-                // single-finger volume/brightness/seek gesture, so a
-                // pinch never turns into a seek or volume change.
-                if (event.getPointerCount() >= 2) {
-                    float d = pinchDistance(event);
-                    if (d > 0) {
-                        pinching = true;
-                        gestureSuppressed = false;
-                        pinchStartDist = d;
-                        pinchBaseZoom = zoomScale;
-                        gestureMode = 0;
-                        gestureSeekTarget = -1;
-                    }
-                }
-                return true;
-            }
-            case MotionEvent.ACTION_POINTER_UP: {
-                if (pinching) {
-                    pinching = false;
-                    gestureMode = 0;
-                    gestureSeekTarget = -1;
-                    // The remaining finger has no fresh ACTION_DOWN
-                    // coming: swallow its moves until it lifts and
-                    // touches again, so pinch never becomes a seek.
-                    gestureSuppressed = true;
-                }
-                return true;
-            }
-            case MotionEvent.ACTION_DOWN:
-                downX = event.getX();
-                downY = event.getY();
-                lastTouchY = downY;
-                handler.removeCallbacks(subLongPress);
-                if (downY > getResources().getDisplayMetrics().heightPixels * 0.3f) {
-                    handler.postDelayed(subLongPress, 520);
-                }
-                gestureMode = 0;
-                gestureSuppressed = false;
-                pinching = false;
-                gestureSeekTarget = -1;
-                gestureLeftSide = downX < getResources().getDisplayMetrics().widthPixels / 2f;
-                try {
-                    if (audioManager != null) {
-                        startVolume = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC);
-                    }
-                    WindowManager.LayoutParams lp = getWindow().getAttributes();
-                    startBrightness = lp.screenBrightness;
-                    if (startBrightness < 0) {
-                        int sys = Settings.System.getInt(getContentResolver(),
-                                Settings.System.SCREEN_BRIGHTNESS, 128);
-                        startBrightness = sys / 255f;
-                    }
-                } catch (Throwable ignored) {
-                }
-                return true;
-            case MotionEvent.ACTION_MOVE: {
-                if (pinching) {
-                    // Two-finger pinch: spread = zoom in, pinch in =
-                    // zoom out. 1.0x to 3.0x, centred and cropped.
-                    // When the zoomed picture covers the whole
-                    // screen there are no black bars left, so that
-                    // is reported as fullscreen.
-                    if (event.getPointerCount() >= 2 && pinchStartDist > 0) {
-                        float ratio = pinchDistance(event) / pinchStartDist;
-                        float z = pinchBaseZoom * ratio;
-                        if (z < 1f) z = 1f;
-                        if (z > 3f) z = 3f;
-                        zoomScale = z;
-                        applyVideoLayout();
-                        if (isCoveringScreen()) {
-                            showGesture(R.drawable.ic_fullscreen, "فول‌اسکرین");
-                        } else {
-                            showGesture(R.drawable.ic_fullscreen,
-                                    "زوم " + Math.round(zoomScale * 100) + "٪");
-                        }
-                    }
-                    return true;
-                }
-                if (gestureSuppressed) {
-                    // Finger left over from a finished pinch:
-                    // only size may change during a pinch, never
-                    // seek/volume/brightness after it.
-                    return true;
-                }
-                float dx = event.getX() - downX;
-                float dy = event.getY() - downY;
-                lastTouchY = event.getY();
-                if (Math.abs(dx) > 24 || Math.abs(dy) > 24) handler.removeCallbacks(subLongPress);
-                int screenW = getResources().getDisplayMetrics().widthPixels;
-                int screenH = getResources().getDisplayMetrics().heightPixels;
-                if (gestureMode == 0) {
-                    if (Math.abs(dy) > 30 && Math.abs(dy) > Math.abs(dx)) {
-                        gestureMode = gestureLeftSide ? 2 : 1;
-                    } else if (Math.abs(dx) > 30 && Math.abs(dx) > Math.abs(dy)) {
-                        gestureMode = 3;
-                    } else {
-                        return true;
-                    }
-                }
-                if (gestureMode == 1 && audioManager != null && maxVolume > 0) {
-                    int vol = (int) (startVolume - dy / screenH * maxVolume);
-                    if (vol < 0) vol = 0;
-                    if (vol > maxVolume) vol = maxVolume;
-                    audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, vol, 0);
-                    showGestureDrawable(volumeIcon(vol * 100 / maxVolume), (vol * 100 / maxVolume) + "٪");
-                } else if (gestureMode == 2) {
-                    float b = startBrightness - dy / screenH;
-                    if (b < 0.05f) b = 0.05f;
-                    if (b > 1f) b = 1f;
-                    WindowManager.LayoutParams lp = getWindow().getAttributes();
-                    lp.screenBrightness = b;
-                    getWindow().setAttributes(lp);
-                    showGestureDrawable(brightnessIcon(b), Math.round(b * 100) + "٪");
-                } else if (gestureMode == 3) {
-                    long dur = getDuration();
-                    if (dur > 0) {
-                        long target = getCurrentPosition() + (long) (dx / screenW * dur);
-                        if (target < 0) target = 0;
-                        if (target > dur) target = dur;
-                        gestureSeekTarget = target;
-                        showGesture(dx >= 0 ? R.drawable.ic_fast_forward : R.drawable.ic_rewind,
-                                formatTime(target) + " / " + formatTime(dur));
-                    }
-                }
-                return true;
-            }
-            case MotionEvent.ACTION_UP:
-            case MotionEvent.ACTION_CANCEL: {
-                handler.removeCallbacks(subLongPress);
-                if (pinching) {
-                    // End of a pinch is not a tap: keep the zoom and
-                    // do not toggle controls or seek.
-                    pinching = false;
-                    gestureMode = 0;
-                    return true;
-                }
-                if (gestureSuppressed) {
-                    // Lift of the finger left over from a pinch:
-                    // not a tap, not a seek, just the end of it.
-                    gestureSuppressed = false;
-                    gestureMode = 0;
-                    gestureSeekTarget = -1;
-                    return true;
-                }
-                if (gestureMode == 3 && gestureSeekTarget >= 0) {
-                    seekTo(gestureSeekTarget);
-                } else if (gestureMode == 0) {
-                    // Tap (or double-tap): single tap toggles
-                    // controls, double-tap on a side seeks ±10s.
-                    long now = System.currentTimeMillis();
-                    if (now - lastTapTime < 350) {
-                        if (lastTapX < getResources().getDisplayMetrics().widthPixels / 2f) {
-                            seekBy(-10000);
-                            showGesture(R.drawable.ic_rewind, "۱۰ ثانیه");
-                        } else {
-                            seekBy(10000);
-                            showGesture(R.drawable.ic_fast_forward, "۱۰ ثانیه");
-                        }
-                        lastTapTime = 0;
-                    } else {
-                        toggleControls();
-                        lastTapTime = now;
-                        lastTapX = event.getX();
-                    }
-                }
-                gestureMode = 0;
-                return true;
-            }
-            default:
-                return true;
-        }
-    }
-
-    private void resetHideTimer() {
-        handler.removeCallbacks(hideControlsRunnable);
-        if (isPlaying()) handler.postDelayed(hideControlsRunnable, 3000);
-    }
-
-    private void showError(String msg) {
-        hideLoading();
-        errorView.setText(msg);
-        errorBox.setVisibility(View.VISIBLE);
-        setControlsVisible(true);
-    }
-
-    private void hideError() {
-        errorBox.setVisibility(View.GONE);
-    }
-
-    private void hideSystemBars() {
-        // Edge-to-edge, including the display cutout: without
-        // SHORT_EDGES, Android keeps the video below / beside the
-        // punch-hole selfie camera and leaves a black strip there,
-        // even though the screen beside the camera is usable.
-        // SHORT_EDGES lets the video draw into the cutout area on
-        // the short edges (landscape left/right), so fullscreen
-        // really is the whole panel, camera hole included.
-        try {
-            if (Build.VERSION.SDK_INT >= 28) {
-                WindowManager.LayoutParams lp = getWindow().getAttributes();
-                lp.layoutInDisplayCutoutMode =
-                        WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
-                getWindow().setAttributes(lp);
-            }
-        } catch (Throwable ignored) {
-        }
-        if (Build.VERSION.SDK_INT >= 30) {
-            try {
-                getWindow().setDecorFitsSystemWindows(false);
-            } catch (Throwable ignored) {
-            }
-            WindowInsetsController c = getWindow().getInsetsController();
-            if (c != null) {
-                c.hide(WindowInsets.Type.statusBars() | WindowInsets.Type.navigationBars());
-                c.setSystemBarsBehavior(
-                        WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
-            }
-        } else {
-            getWindow().getDecorView().setSystemUiVisibility(
-                    View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
-                            | View.SYSTEM_UI_FLAG_FULLSCREEN
-                            | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
-                            | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
-                            | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
-                            | View.SYSTEM_UI_FLAG_LAYOUT_STABLE);
-        }
-    }
-
-    private static String formatTime(long ms) {
-        long total = ms / 1000;
-        long h = total / 3600;
-        long m = (total % 3600) / 60;
-        long s = total % 60;
-        if (h > 0) return String.format("%02d:%02d:%02d", h, m, s);
-        return String.format("%02d:%02d", m, s);
     }
 
     @Override
     protected void onPause() {
         super.onPause();
-        try { saveProgressNow(); } catch (Throwable ignored) { }
-        try {
-            if (useVlc && vlcPlayer != null && vlcPlayer.isPlaying()) vlcPlayer.pause();
-            else if (exoPlayer != null && exoPlayer.isPlaying()) exoPlayer.pause();
-        } catch (Throwable ignored) {
+        if (player != null) {
+            long dur = player.getDuration();
+            long pos = player.getCurrentPosition();
+            if (dur > 0 && pos > 2000) {
+                Progress.save(this, streamUrl, videoTitle, metaJson, pos, dur);
+            }
+            player.pause();
         }
     }
 
     @Override
     protected void onDestroy() {
-        try { saveProgressNow(); } catch (Throwable ignored) { }
-        try { saveSubTransform(); } catch (Throwable ignored) { }
-        try { if (noisyRegistered) unregisterReceiver(noisyReceiver); } catch (Throwable ignored) { }
-        try { if (audioManager != null) audioManager.abandonAudioFocus(focusListener); } catch (Throwable ignored) { }
-        handler.removeCallbacksAndMessages(null);
-        releaseVlc();
-        releaseExo();
         super.onDestroy();
+        handler.removeCallbacksAndMessages(null);
+        if (player != null) {
+            player.release();
+            player = null;
+        }
     }
 }
