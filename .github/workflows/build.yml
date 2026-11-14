@@ -35,5 +35,5 @@ jobs:
         run: gradle --no-daemon assembleDebug
       - uses: actions/upload-artifact@v4
         with:
-          name: TOOSH-MOVIE-debug-apk
+          name: TOOSH-MOVIEs-debug-apk
           path: app/build/outputs/apk/debug/*.apk
